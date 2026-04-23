@@ -8,6 +8,9 @@ CONFIG <- list(
     data_path = "testfile_zinb_nonlinear_eintritte.csv",
     target = "n_eintritte",
     feature_cols = c("prcrank", "potenzielle_kunden", "unfalldeckung"),
+    # Columns listed here are kept out of modeling even if they exist in the
+    # dataset. Use this for row IDs, customer IDs, policy numbers, or other
+    # technical identifiers that should never become predictors.
     id_cols = character(0),
 
     # Reproducibility and CV
@@ -23,14 +26,36 @@ CONFIG <- list(
   ),
 
   preprocess = list(
+    # Where the derived dataset and its metadata are written.
     output_dir = "outputs_preprocessed",
+
+    # Base file name for the processed dataset, for example
+    # "preprocessed_dataset.csv" and "preprocessed_dataset.rds".
     output_name = "preprocessed_dataset",
+
+    # Output formats for the processed dataset. Supported values are:
+    # csv, tsv, txt, tab, rds, rda, RData
     output_formats = c("csv", "rds"),
+
+    # Optional row filter expression evaluated on the dataset, for example:
+    # "n_eintritte >= 1 & prcrank <= 8"
     filter = "",
+
+    # Optional allowlist of columns to keep. Leave empty to keep all columns.
     keep_cols = character(0),
+
+    # Optional list of columns to remove after loading.
     drop_cols = character(0),
+
+    # If TRUE, remove rows with missing values after filtering and column
+    # selection.
     drop_missing_rows = FALSE,
+
+    # If TRUE, convert character columns to factors before saving.
     chars_to_factors = TRUE,
+
+    # Warn if a factor level appears fewer than this many times in the
+    # processed dataset.
     factor_min_count = 5L
   ),
 

@@ -243,6 +243,10 @@ CONFIG$experiment$data_path <- "/absolute/path/to/my_dataset.csv"
 
 Absolute paths, repo-relative paths, and `~/...` paths are supported.
 
+`CONFIG$experiment$id_cols` can be used for identifier columns that exist in the
+dataset but must not be used as predictors, for example customer IDs, policy
+numbers, or technical row IDs.
+
 ## Outputs
 
 Generated files are written to:
