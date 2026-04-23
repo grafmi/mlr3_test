@@ -26,6 +26,7 @@ CONFIG$experiment$data_path <- "/absolute/path/to/my_dataset.csv"
 CONFIG$experiment$feature_cols <- c("prcrank", "potenzielle_kunden", "unfalldeckung")
 CONFIG$experiment$seed <- 123L
 CONFIG$experiment$n_folds <- 10L
+CONFIG$experiment$inner_folds <- 5L
 ```
 
 Then run:
@@ -111,6 +112,8 @@ config.R
 The file is grouped so that the most important settings appear first:
 
 - `CONFIG$experiment`: data path, target, features, seed, folds, workers
+- `CONFIG$experiment$inner_folds`: folds used in the inner tuning loop for
+  `ranger` and `xgboost`
 - `CONFIG$preprocess`: preprocessing defaults and factor handling
 - `CONFIG$ranger`: ranger output directory and tuning defaults
 - `CONFIG$xgboost`: xgboost output directory and tuning defaults
@@ -150,6 +153,11 @@ zero_inflation_formula = "1"
 zero_inflation_formula = "same_as_count"
 zero_inflation_formula = "prcrank + log1p(potenzielle_kunden)"
 ```
+
+Before the ZINB cross-validation starts, the script now validates the
+zero-inflation formula and all configured feature transformations against the
+modeling data. That catches missing columns and invalid formula terms earlier,
+before a longer CV run starts.
 
 ## Running
 
@@ -209,7 +217,7 @@ Common command-line overrides:
 Rscript preprocess_data.R --input=/path/to/data.rds --formats=csv,rds --filter="n_eintritte >= 0"
 Rscript preprocess_data.R --keep-cols=n_eintritte,prcrank --drop-missing-rows=true
 Rscript preprocess_data.R --chars-to-factors=true --factor-min-count=5
-Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --tune-evals=20 --workers=4
+Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5 --tune-evals=20 --workers=4
 Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
 Rscript zinb_stepwise_cv.R --metric=rmse --max-vars=3 --workers=4
 Rscript compare_best_models.R --metric=rmse
@@ -220,13 +228,15 @@ The same settings can be controlled with environment variables, for example
 `PREPROCESS_OUTPUT_FORMATS`, `PREPROCESS_FILTER`, `PREPROCESS_KEEP_COLS`,
 `PREPROCESS_DROP_COLS`, `PREPROCESS_DROP_MISSING_ROWS`,
 `PREPROCESS_CHARS_TO_FACTORS`, `PREPROCESS_FACTOR_MIN_COUNT`,
-`MLR3_DATA_PATH`, `N_FOLDS`, `TUNE_EVALS`, `N_WORKERS`,
+`MLR3_DATA_PATH`, `N_FOLDS`, `INNER_FOLDS`, `TUNE_EVALS`, `N_WORKERS`,
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
 `COMPARISON_OUTPUT_DIR`. ZINB also supports `ZINB_WORKERS`, which takes
 precedence over `N_WORKERS` for that script.
 
 For reproducibility, the default worker count is `1`. Increase `--workers` for
 faster mlr3 runs and for parallel ZINB candidate evaluation on Linux.
+Using a smaller `inner_folds` than `n_folds` is often a good compromise when
+you want faster tuning runs without changing the outer validation design.
 
 ## Outputs And Tracking
 

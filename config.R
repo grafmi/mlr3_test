@@ -16,6 +16,10 @@ CONFIG <- list(
     # Reproducibility and CV
     seed = 123L,
     n_folds = 10L,
+    # Number of folds used in the inner tuning loop for mlr3 models. This can
+    # be smaller than `n_folds` to speed up tuning while keeping the outer
+    # validation loop unchanged.
+    inner_folds = 5L,
     strata_bins = 10L,
     n_workers = 1L
   ),

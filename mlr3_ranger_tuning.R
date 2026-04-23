@@ -61,6 +61,7 @@ DATA_PATH <- get_path_setting(
 )
 OUTPUT_DIR <- get_path_setting("output-dir", "RANGER_OUTPUT_DIR", config_value(CONFIG, c("ranger", "output_dir")), base_dir = REPO_DIR)
 N_FOLDS <- get_int_setting("folds", "N_FOLDS", config_value(CONFIG, c("experiment", "n_folds")), min_value = 2)
+INNER_FOLDS <- get_int_setting("inner-folds", "INNER_FOLDS", config_value(CONFIG, c("experiment", "inner_folds")), min_value = 2)
 SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
 TUNE_EVALS <- get_int_setting("tune-evals", "TUNE_EVALS", config_value(CONFIG, c("ranger", "tune_evals")), min_value = 1)
 STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", config_value(CONFIG, c("experiment", "strata_bins")), min_value = 2)
@@ -72,6 +73,10 @@ N_WORKERS <- get_int_setting("workers", "N_WORKERS", config_value(CONFIG, c("exp
 .script_ok <- FALSE
 LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
 with_run_finalizer({
+  if (INNER_FOLDS > N_FOLDS) {
+    stop("INNER_FOLDS must be less than or equal to N_FOLDS.", call. = FALSE)
+  }
+
   set.seed(SEED)
   if (N_WORKERS > 1) {
     future::plan(future::multisession, workers = N_WORKERS)
@@ -87,7 +92,10 @@ with_run_finalizer({
   log_info("Using data file: ", normalizePath(DATA_PATH, mustWork = FALSE))
   log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
   log_info("Using features: ", paste(FEATURE_COLS, collapse = ", "))
-  log_info("Using folds / tuning evals / workers: ", N_FOLDS, " / ", TUNE_EVALS, " / ", N_WORKERS)
+  log_info(
+    "Using outer folds / inner folds / tuning evals / workers: ",
+    N_FOLDS, " / ", INNER_FOLDS, " / ", TUNE_EVALS, " / ", N_WORKERS
+  )
 
   backend <- add_regression_stratum(as.data.frame(work_dt), target = TARGET, n_bins = STRATA_BINS)
   task <- make_regr_task("ranger_regression", backend = backend, target = TARGET)
@@ -131,7 +139,7 @@ with_run_finalizer({
 
   search_space <- do.call(ps, ranger_space_args)
 
-  inner_cv <- rsmp("cv", folds = N_FOLDS)
+  inner_cv <- rsmp("cv", folds = INNER_FOLDS)
 
   at <- auto_tuner(
     tuner = tnr("random_search"),

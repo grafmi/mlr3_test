@@ -124,6 +124,57 @@ formula_label <- function(formula_obj) {
   gsub("\\s+", " ", paste(deparse(formula_obj), collapse = " "))
 }
 
+validate_formula_rhs_on_data <- function(rhs, dt, label) {
+  rhs <- trimws(rhs)
+  if (!nzchar(rhs)) {
+    stop(label, " must not be empty.", call. = FALSE)
+  }
+
+  rhs_formula <- tryCatch(
+    as.formula(sprintf("~ %s", rhs)),
+    error = function(e) {
+      stop(label, " is not a valid formula right-hand side: ", conditionMessage(e), call. = FALSE)
+    }
+  )
+
+  referenced_vars <- all.vars(rhs_formula)
+  missing_vars <- setdiff(referenced_vars, names(dt))
+  if (length(missing_vars) > 0) {
+    stop(label, " references columns that are not present in the data: ",
+         paste(missing_vars, collapse = ", "), call. = FALSE)
+  }
+
+  tryCatch(
+    stats::model.frame(rhs_formula, data = as.data.frame(dt), na.action = stats::na.pass),
+    error = function(e) {
+      stop(label, " cannot be evaluated on the modeling data: ", conditionMessage(e), call. = FALSE)
+    }
+  )
+
+  invisible(TRUE)
+}
+
+validate_zinb_setup <- function(dt, target, feature_cols, zero_formula_rhs) {
+  if (!identical(zero_formula_rhs, "same_as_count")) {
+    validate_formula_rhs_on_data(zero_formula_rhs, dt, "ZINB zero-formula")
+  }
+
+  for (feature in feature_cols) {
+    tfms <- valid_transformations(dt[[feature]])
+    if (length(tfms) == 0) {
+      stop("Feature '", feature, "' has no valid ZINB transformation for its type or values.", call. = FALSE)
+    }
+
+    for (tfm in tfms) {
+      validate_formula_rhs_on_data(term_for(feature, tfm), dt, sprintf("ZINB term for '%s' [%s]", feature, tfm))
+    }
+  }
+
+  baseline_formula <- make_formula(target, character(0), zero_formula_rhs = zero_formula_rhs)
+  validate_formula_rhs_on_data(as.character(baseline_formula)[3], dt, "ZINB baseline count formula")
+  invisible(TRUE)
+}
+
 fit_convergence_reason <- function(fit, warnings = character(0)) {
   optim_convergence <- fit$optim$convergence
   converged <- isTRUE(fit$converged)
@@ -306,6 +357,8 @@ with_run_finalizer({
   log_info("Using features: ", paste(FEATURE_COLS, collapse = ", "))
   log_info("Using folds / metric / workers: ", N_FOLDS, " / ", METRIC_TO_OPTIMIZE, " / ", N_WORKERS)
   log_info("Using zero-inflation formula: ", ZERO_INFLATION_FORMULA)
+
+  validate_zinb_setup(work_dt, TARGET, FEATURE_COLS, ZERO_INFLATION_FORMULA)
 
   predictor_pool <- FEATURE_COLS
   fold_ids <- make_stratified_fold_ids(work_dt[[TARGET]], nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
