@@ -99,6 +99,17 @@ config_value <- function(config, path) {
   value
 }
 
+has_config_value <- function(config, path) {
+  value <- config
+  for (name in path) {
+    if (!is.list(value) || is.null(value[[name]])) {
+      return(FALSE)
+    }
+    value <- value[[name]]
+  }
+  TRUE
+}
+
 parse_csv_setting <- function(value) {
   if (is.null(value) || !nzchar(trimws(value))) return(character(0))
   out <- trimws(unlist(strsplit(value, ",", fixed = TRUE), use.names = FALSE))

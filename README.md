@@ -247,6 +247,11 @@ Absolute paths, repo-relative paths, and `~/...` paths are supported.
 dataset but must not be used as predictors, for example customer IDs, policy
 numbers, or technical row IDs.
 
+For `CONFIG$ranger$search_space` and `CONFIG$xgboost$search_space`, supported
+optional parameters can also be removed or commented out. If a known optional
+entry is missing in `config.R`, that parameter is simply not tuned in the
+corresponding script.
+
 ## Outputs
 
 Generated files are written to:

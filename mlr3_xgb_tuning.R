@@ -103,7 +103,7 @@ learner <- lrn(
   seed = SEED
 )
 
-search_space <- ps(
+xgb_space_args <- list(
   nrounds = p_int(
     lower = config_value(CONFIG, c("xgboost", "search_space", "nrounds"))[[1]],
     upper = config_value(CONFIG, c("xgboost", "search_space", "nrounds"))[[2]]
@@ -137,6 +137,15 @@ search_space <- ps(
     upper = config_value(CONFIG, c("xgboost", "search_space", "alpha"))[[2]]
   )
 )
+
+if (has_config_value(CONFIG, c("xgboost", "search_space", "gamma"))) {
+  xgb_space_args$gamma <- p_dbl(
+    lower = config_value(CONFIG, c("xgboost", "search_space", "gamma"))[[1]],
+    upper = config_value(CONFIG, c("xgboost", "search_space", "gamma"))[[2]]
+  )
+}
+
+search_space <- do.call(ps, xgb_space_args)
 
 inner_cv <- rsmp("cv", folds = N_FOLDS)
 

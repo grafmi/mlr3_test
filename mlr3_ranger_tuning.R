@@ -101,7 +101,7 @@ learner <- lrn(
   seed = SEED
 )
 
-search_space <- ps(
+ranger_space_args <- list(
   num.trees = p_int(
     lower = config_value(CONFIG, c("ranger", "search_space", "num_trees"))[[1]],
     upper = config_value(CONFIG, c("ranger", "search_space", "num_trees"))[[2]]
@@ -117,6 +117,19 @@ search_space <- ps(
   ),
   replace = p_lgl()
 )
+
+if (has_config_value(CONFIG, c("ranger", "search_space", "max_depth"))) {
+  ranger_space_args$max.depth <- p_int(
+    lower = config_value(CONFIG, c("ranger", "search_space", "max_depth"))[[1]],
+    upper = config_value(CONFIG, c("ranger", "search_space", "max_depth"))[[2]]
+  )
+}
+
+if (has_config_value(CONFIG, c("ranger", "search_space", "splitrule"))) {
+  ranger_space_args$splitrule <- p_fct(levels = config_value(CONFIG, c("ranger", "search_space", "splitrule")))
+}
+
+search_space <- do.call(ps, ranger_space_args)
 
 inner_cv <- rsmp("cv", folds = N_FOLDS)
 

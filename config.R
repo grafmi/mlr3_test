@@ -62,25 +62,62 @@ CONFIG <- list(
   ranger = list(
     output_dir = "outputs_ranger",
     tune_evals = 10L,
+    # Search-space entries can be removed or commented out. If a supported
+    # optional entry is missing here, it is simply not tuned.
     search_space = list(
+      # Number of trees. More trees can stabilize performance, but cost more
+      # runtime.
       num_trees = c(300L, 1500L),
+
+      # Minimum terminal node size. Smaller values allow more flexible trees;
+      # larger values regularize more strongly.
       min_node_size = c(1L, 25L),
-      sample_fraction = c(0.5, 1.0)
+
+      # Row subsampling fraction per tree.
+      sample_fraction = c(0.5, 1.0),
+
+      # Optional tree depth limit. Larger values allow more complex trees.
+      max_depth = c(0L, 12L),
+
+      # Candidate split rules for regression forests. "variance" is the
+      # standard baseline; "extratrees" adds more randomness.
+      splitrule = c("variance", "extratrees")
     )
   ),
 
   xgboost = list(
     output_dir = "outputs_xgb",
     tune_evals = 10L,
+    # Search-space entries can be removed or commented out. If a supported
+    # optional entry is missing here, it is simply not tuned.
     search_space = list(
+      # Number of boosting rounds.
       nrounds = c(50L, 800L),
+
+      # Learning rate. Smaller values are usually safer but need more rounds.
       eta = c(0.01, 0.30),
+
+      # Maximum tree depth.
       max_depth = c(2L, 8L),
+
+      # Minimum Hessian weight in a child node; larger values regularize more.
       min_child_weight = c(1.0, 15.0),
+
+      # Row subsampling fraction per boosting round.
       subsample = c(0.5, 1.0),
+
+      # Column subsampling fraction per tree.
       colsample_bytree = c(0.4, 1.0),
+
+      # L2 regularization.
       lambda = c(0.0, 10.0),
-      alpha = c(0.0, 10.0)
+
+      # L1 regularization.
+      alpha = c(0.0, 10.0),
+
+      # Minimum loss reduction needed for an extra split. Higher values make
+      # trees more conservative.
+      gamma = c(0.0, 5.0)
     )
   ),
 
