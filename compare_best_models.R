@@ -50,7 +50,7 @@ METRIC_TO_RANK <- get_setting("metric", "METRIC_TO_RANK", config_value(CONFIG, c
 # Helpers
 # =========================
 safe_metrics_row <- function(dt, model_name) {
-  needed <- c("rmse", "mae", "max_error", "sae", "mse", "bias", "r2")
+  needed <- c("rmse", "mae", "max_error", "sae", "mse", "bias", "r2", "poisson_deviance", "negloglik")
   out <- data.table(model = model_name)
   for (nm in needed) {
     value <- if (!is.null(dt) && nm %in% names(dt) && nrow(dt) > 0) dt[[nm]][1] else NA_real_
@@ -178,7 +178,7 @@ with_run_finalizer({
   setorder(comparison, rank, model)
   setcolorder(comparison, c(
     "rank", "model", "availability_status", "availability_reason", "manifest_status",
-    "rmse", "mae", "max_error", "sae", "mse", "bias", "r2", "details"
+    "rmse", "mae", "max_error", "sae", "mse", "bias", "r2", "poisson_deviance", "negloglik", "details"
   ))
 
   out_path <- file.path(OUTPUT_DIR, "best_models_comparison.csv")

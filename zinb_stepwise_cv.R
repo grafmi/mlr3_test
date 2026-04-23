@@ -75,7 +75,7 @@ if (!nzchar(ZERO_INFLATION_FORMULA)) {
   stop("ZINB zero-formula must not be empty.", call. = FALSE)
 }
 
-ALLOWED_METRICS <- c("rmse", "mae", "max_error", "mse", "r2")
+ALLOWED_METRICS <- c("rmse", "mae", "max_error", "mse", "r2", "poisson_deviance", "negloglik")
 if (!METRIC_TO_OPTIMIZE %in% ALLOWED_METRICS) {
   stop("METRIC_TO_OPTIMIZE must be one of: ", paste(ALLOWED_METRICS, collapse = ", "), call. = FALSE)
 }
@@ -228,7 +228,40 @@ fit_predict_one_fold <- function(train_dt, test_dt, formula_obj) {
     return(list(ok = FALSE, reason = "predict returned invalid or only NA values"))
   }
 
-  list(ok = TRUE, model = fit, pred = as.numeric(pred))
+  count_mean <- tryCatch(
+    predict(fit, newdata = test_dt, type = "count"),
+    error = function(e) structure(list(message = conditionMessage(e)), class = "zinb_predict_error")
+  )
+  if (inherits(count_mean, "zinb_predict_error")) {
+    return(list(ok = FALSE, reason = sprintf("count prediction failed: %s", count_mean$message)))
+  }
+
+  zero_prob <- tryCatch(
+    predict(fit, newdata = test_dt, type = "zero"),
+    error = function(e) structure(list(message = conditionMessage(e)), class = "zinb_predict_error")
+  )
+  if (inherits(zero_prob, "zinb_predict_error")) {
+    return(list(ok = FALSE, reason = sprintf("zero prediction failed: %s", zero_prob$message)))
+  }
+
+  theta <- fit$theta
+  if (is.null(theta) || !is.finite(theta) || theta <= 0) {
+    return(list(ok = FALSE, reason = "fitted ZINB theta is missing or invalid"))
+  }
+
+  y <- test_dt[[all.vars(formula_obj)[1]]]
+  mu <- pmax(as.numeric(count_mean), .Machine$double.eps)
+  pi0 <- pmin(pmax(as.numeric(zero_prob), 0), 1)
+  nb_prob <- stats::dnbinom(y, mu = mu, size = theta)
+  point_prob <- ifelse(y == 0, pi0 + (1 - pi0) * nb_prob, (1 - pi0) * nb_prob)
+  point_prob <- pmax(point_prob, .Machine$double.eps)
+
+  list(
+    ok = TRUE,
+    model = fit,
+    pred = as.numeric(pred),
+    point_negloglik = -log(point_prob)
+  )
 }
 
 evaluate_formula_cv <- function(dt, target, fold_ids, formula_obj, metric = "rmse") {
@@ -245,7 +278,7 @@ evaluate_formula_cv <- function(dt, target, fold_ids, formula_obj, metric = "rms
       return(list(ok = FALSE, reason = sprintf("%s in fold %s", res$reason, fold)))
     }
 
-    fm <- reg_metrics(test_dt[[target]], res$pred)
+    fm <- reg_metrics(test_dt[[target]], res$pred, negloglik = res$point_negloglik)
     fm[, fold := fold]
     fold_results[[fold]] <- fm
 
@@ -255,7 +288,8 @@ evaluate_formula_cv <- function(dt, target, fold_ids, formula_obj, metric = "rms
       truth = test_dt[[target]],
       response = res$pred,
       error = res$pred - test_dt[[target]],
-      abs_error = abs(res$pred - test_dt[[target]])
+      abs_error = abs(res$pred - test_dt[[target]]),
+      negloglik = res$point_negloglik
     )
   }
 
@@ -298,6 +332,8 @@ evaluate_candidate <- function(spec, work_dt, target, fold_ids, metric) {
       mse = ev$overall$mse,
       bias = ev$overall$bias,
       r2 = ev$overall$r2,
+      poisson_deviance = ev$overall$poisson_deviance,
+      negloglik = ev$overall$negloglik,
       optimization_score = ev$score
     )
     return(list(ok = TRUE, summary = summary, eval = ev))

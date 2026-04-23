@@ -162,6 +162,14 @@ zero-inflation formula and all configured feature transformations against the
 modeling data. That catches missing columns and invalid formula terms earlier,
 before a longer CV run starts.
 
+For count-aware evaluation, the scripts now also report:
+
+- `poisson_deviance`: useful as a count-focused error measure across models
+- `negloglik`: available for ZINB and based on the fitted ZINB probability model
+
+`rmse` remains the default ranking metric because it stays easy to interpret and
+works consistently across all model families in this repository.
+
 ## Running
 
 Typical usage from the repository root:
@@ -231,7 +239,7 @@ Rscript preprocess_data.R --keep-cols=n_eintritte,prcrank --drop-missing-rows=tr
 Rscript preprocess_data.R --chars-to-factors=true --factor-min-count=5
 Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5 --tune-evals=20 --workers=4
 Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
-Rscript zinb_stepwise_cv.R --metric=rmse --max-vars=3 --workers=4
+Rscript zinb_stepwise_cv.R --metric=poisson_deviance --max-vars=3 --workers=4
 Rscript compare_best_models.R --metric=rmse
 ```
 

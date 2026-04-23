@@ -404,10 +404,23 @@ make_stratified_custom_cv <- function(task, target, nfolds = 10, seed = 123, n_b
   rsmp_custom
 }
 
-reg_metrics <- function(truth, response) {
+poisson_deviance_score <- function(truth, mean_pred) {
+  if (!is.numeric(truth) || !is.numeric(mean_pred)) return(NA_real_)
+  if (length(truth) != length(mean_pred)) return(NA_real_)
+  if (any(truth < 0, na.rm = TRUE)) return(NA_real_)
+
+  mu <- pmax(mean_pred, .Machine$double.eps)
+  y <- truth
+  term <- ifelse(y == 0, 0, y * log(y / mu))
+  mean(2 * (term - (y - mu)), na.rm = TRUE)
+}
+
+reg_metrics <- function(truth, response, negloglik = NULL) {
   err <- response - truth
   sse <- sum(err^2, na.rm = TRUE)
   sst <- sum((truth - mean(truth, na.rm = TRUE))^2, na.rm = TRUE)
+  poisson_deviance <- poisson_deviance_score(truth, response)
+  mean_negloglik <- if (is.null(negloglik)) NA_real_ else mean(negloglik, na.rm = TRUE)
 
   data.table::data.table(
     rmse = sqrt(mean(err^2, na.rm = TRUE)),
@@ -416,7 +429,9 @@ reg_metrics <- function(truth, response) {
     sae = sum(err, na.rm = TRUE),
     mse = mean(err^2, na.rm = TRUE),
     bias = mean(err, na.rm = TRUE),
-    r2 = if (isTRUE(all.equal(sst, 0))) NA_real_ else 1 - sse / sst
+    r2 = if (isTRUE(all.equal(sst, 0))) NA_real_ else 1 - sse / sst,
+    poisson_deviance = poisson_deviance,
+    negloglik = mean_negloglik
   )
 }
 
@@ -436,11 +451,19 @@ predictions_from_resample <- function(rr) {
 }
 
 fold_metrics_from_predictions <- function(predictions) {
-  predictions[, reg_metrics(truth, response), by = fold][order(fold)]
+  predictions[, reg_metrics(
+    truth,
+    response,
+    negloglik = if ("negloglik" %in% names(predictions)) negloglik else NULL
+  ), by = fold][order(fold)]
 }
 
 aggregate_predictions <- function(predictions) {
-  reg_metrics(predictions$truth, predictions$response)
+  reg_metrics(
+    predictions$truth,
+    predictions$response,
+    negloglik = if ("negloglik" %in% names(predictions)) predictions$negloglik else NULL
+  )
 }
 
 add_regression_stratum <- function(backend, target, n_bins = 10, col_name = ".target_stratum") {

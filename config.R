@@ -131,6 +131,9 @@ CONFIG <- list(
     output_dir = "outputs_zinb",
 
     # Metric used to decide which candidate is best during forward selection.
+    # Supported values include rmse, mae, max_error, mse, r2,
+    # poisson_deviance, and negloglik. Keep rmse as the default if you want
+    # the most straightforward model-agnostic ranking.
     metric = "rmse",
 
     # Maximum number of variables that may be selected into the final model.
@@ -159,6 +162,8 @@ CONFIG <- list(
 
   comparison = list(
     output_dir = "outputs_model_comparison",
+    # Metric used to rank models in the comparison output. rmse stays the
+    # default because it is available across all model families in this repo.
     metric = "rmse",
     ranger_dir = "outputs_ranger",
     xgb_dir = "outputs_xgb",
