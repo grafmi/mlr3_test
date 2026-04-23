@@ -284,6 +284,8 @@ collect_tuning_results <- function(rr, measure_col = "regr.rmse") {
 safe_write_csv <- function(dt, path) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   data.table::fwrite(dt, path)
+  rds_path <- if (grepl("\\.csv$", path)) sub("\\.csv$", ".rds", path) else paste0(path, ".rds")
+  saveRDS(dt, rds_path)
 }
 
 timestamp <- function() {

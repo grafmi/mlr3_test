@@ -151,6 +151,7 @@ Each model script writes:
 *_overall_metrics.csv
 *_cv_predictions.csv
 *_best_params.csv or ZINB step-selection tables
+matching *.rds files for each CSV result
 *.log
 ```
 
@@ -158,8 +159,12 @@ Each model script writes:
 
 ```text
 outputs_model_comparison/best_models_comparison.csv
+outputs_model_comparison/best_models_comparison.rds
 outputs_model_comparison/compare_best_models.log
 ```
+
+Every CSV result is also saved as a same-named RDS file, for example
+`ranger_overall_metrics.csv` and `ranger_overall_metrics.rds`.
 
 The log files are written into the same output directory as the CSV files. They
 capture the script settings, progress messages, package output, warnings, and
