@@ -102,8 +102,8 @@ zinb_stepwise_cv.R
 
 Runs stepwise feature and transformation selection for a zero-inflated negative
 binomial model via `pscl::zeroinfl`. The count part is selected stepwise from
-`FEATURE_COLS`; the zero-inflation part is currently fixed to an intercept
-(`| 1`).
+`FEATURE_COLS`; the zero-inflation part defaults to an intercept (`| 1`) but
+can be set explicitly in `config.R`.
 
 ```text
 compare_best_models.R
@@ -225,7 +225,8 @@ The file is grouped so that the most important settings appear first:
 - `CONFIG$preprocess`: preprocessing defaults and factor handling
 - `CONFIG$ranger`: ranger output directory and tuning defaults
 - `CONFIG$xgboost`: xgboost output directory and tuning defaults
-- `CONFIG$zinb`: ZINB output directory, metric, transformations, and workers
+- `CONFIG$zinb`: ZINB output directory, metric, transformations, workers, and
+  zero-inflation formula
 - `CONFIG$comparison`: model-comparison defaults
 
 The scripts use this precedence order:
@@ -251,6 +252,17 @@ For `CONFIG$ranger$search_space` and `CONFIG$xgboost$search_space`, supported
 optional parameters can also be removed or commented out. If a known optional
 entry is missing in `config.R`, that parameter is simply not tuned in the
 corresponding script.
+
+For ZINB, `CONFIG$zinb$zero_inflation_formula` controls the right-hand side of
+the zero-inflation part. Examples:
+
+```r
+zero_inflation_formula = "1"
+zero_inflation_formula = "prcrank + unfalldeckung"
+zero_inflation_formula = "same_as_count"
+```
+
+The default is `"1"`, which corresponds to `| 1`.
 
 ## Outputs
 

@@ -67,10 +67,13 @@ N_WORKERS <- get_int_setting(
 )
 TRANSFORMATIONS_NUMERIC <- config_value(CONFIG, c("zinb", "transformations_numeric"))
 TRANSFORMATIONS_FACTOR <- config_value(CONFIG, c("zinb", "transformations_factor"))
-USE_SAME_FORMULA_FOR_ZERO_PART <- get_bool_setting(
-  "same-zero-formula", "ZINB_SAME_ZERO_FORMULA",
-  config_value(CONFIG, c("zinb", "same_zero_formula"))
-)
+ZERO_INFLATION_FORMULA <- trimws(get_setting(
+  "zero-formula", "ZINB_ZERO_FORMULA",
+  config_value(CONFIG, c("zinb", "zero_inflation_formula"))
+))
+if (!nzchar(ZERO_INFLATION_FORMULA)) {
+  stop("ZINB zero-formula must not be empty.", call. = FALSE)
+}
 
 ALLOWED_METRICS <- c("rmse", "mae", "max_error", "mse", "r2")
 if (!METRIC_TO_OPTIMIZE %in% ALLOWED_METRICS) {
@@ -111,9 +114,9 @@ term_for <- function(var, transformation) {
   )
 }
 
-make_formula <- function(target, terms, same_zero_formula = TRUE) {
+make_formula <- function(target, terms, zero_formula_rhs = "1") {
   rhs_count <- if (length(terms) == 0) "1" else paste(terms, collapse = " + ")
-  rhs_zero <- if (same_zero_formula) rhs_count else "1"
+  rhs_zero <- if (identical(zero_formula_rhs, "same_as_count")) rhs_count else zero_formula_rhs
   as.formula(sprintf("%s ~ %s | %s", quote_name(target), rhs_count, rhs_zero))
 }
 
@@ -302,11 +305,12 @@ log_info("Using data file: ", normalizePath(DATA_PATH, mustWork = FALSE))
 log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
 log_info("Using features: ", paste(FEATURE_COLS, collapse = ", "))
 log_info("Using folds / metric / workers: ", N_FOLDS, " / ", METRIC_TO_OPTIMIZE, " / ", N_WORKERS)
+log_info("Using zero-inflation formula: ", ZERO_INFLATION_FORMULA)
 
 predictor_pool <- FEATURE_COLS
 fold_ids <- make_stratified_fold_ids(work_dt[[TARGET]], nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
 
-baseline_formula <- make_formula(TARGET, character(0), same_zero_formula = USE_SAME_FORMULA_FOR_ZERO_PART)
+baseline_formula <- make_formula(TARGET, character(0), zero_formula_rhs = ZERO_INFLATION_FORMULA)
 baseline_eval <- evaluate_formula_cv(work_dt, TARGET, fold_ids, baseline_formula, metric = METRIC_TO_OPTIMIZE)
 if (!isTRUE(baseline_eval$ok)) {
   stop("The intercept-only ZINB baseline failed: ", baseline_eval$reason, call. = FALSE)
@@ -353,7 +357,7 @@ for (step_i in seq_len(max_steps)) {
         variable = v,
         transformation = tfm,
         term = term,
-        formula_obj = make_formula(TARGET, terms_now, same_zero_formula = USE_SAME_FORMULA_FOR_ZERO_PART)
+        formula_obj = make_formula(TARGET, terms_now, zero_formula_rhs = ZERO_INFLATION_FORMULA)
       )
       spec_idx <- spec_idx + 1L
     }

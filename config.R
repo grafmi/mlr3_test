@@ -122,14 +122,35 @@ CONFIG <- list(
   ),
 
   zinb = list(
+    # Where all ZINB CV results, candidate tables, metrics, and logs are
+    # written.
     output_dir = "outputs_zinb",
+
+    # Metric used to decide which candidate is best during forward selection.
     metric = "rmse",
+
+    # Maximum number of variables that may be selected into the final model.
+    # `Inf` means that all variables in `feature_cols` may be considered.
     max_vars = Inf,
+
+    # Minimum improvement required before a new step is accepted.
     min_improvement = 0.0,
+
+    # Number of worker processes for parallel candidate evaluation on Linux.
     workers = 16L,
+
+    # Allowed transformations for numeric predictors during forward selection.
     transformations_numeric = c("raw", "sqrt", "log1p", "ns2", "poly2"),
+
+    # Allowed transformations for factor predictors. In the current setup,
+    # factors are only used in raw form.
     transformations_factor = c("raw"),
-    same_zero_formula = FALSE
+
+    # Formula right-hand side for the zero-inflation part. Use "1" for an
+    # intercept-only zero part, or set an explicit formula such as
+    # "prcrank + log1p(potenzielle_kunden)". The special value
+    # "same_as_count" reuses the currently selected count-model terms.
+    zero_inflation_formula = "1"
   ),
 
   comparison = list(
