@@ -295,192 +295,178 @@ evaluate_candidates_parallel <- function(candidate_specs, work_dt, target, fold_
 # =========================
 .script_ok <- FALSE
 LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
+with_run_finalizer({
+  set.seed(SEED)
+  df <- load_csv_checked(DATA_PATH)
+  work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS, require_count_target = TRUE)
+  dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
-set.seed(SEED)
-df <- load_csv_checked(DATA_PATH)
-work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS, require_count_target = TRUE)
-dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+  log_info("Using data file: ", normalizePath(DATA_PATH, mustWork = FALSE))
+  log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+  log_info("Using features: ", paste(FEATURE_COLS, collapse = ", "))
+  log_info("Using folds / metric / workers: ", N_FOLDS, " / ", METRIC_TO_OPTIMIZE, " / ", N_WORKERS)
+  log_info("Using zero-inflation formula: ", ZERO_INFLATION_FORMULA)
 
-log_info("Using data file: ", normalizePath(DATA_PATH, mustWork = FALSE))
-log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
-log_info("Using features: ", paste(FEATURE_COLS, collapse = ", "))
-log_info("Using folds / metric / workers: ", N_FOLDS, " / ", METRIC_TO_OPTIMIZE, " / ", N_WORKERS)
-log_info("Using zero-inflation formula: ", ZERO_INFLATION_FORMULA)
+  predictor_pool <- FEATURE_COLS
+  fold_ids <- make_stratified_fold_ids(work_dt[[TARGET]], nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
 
-predictor_pool <- FEATURE_COLS
-fold_ids <- make_stratified_fold_ids(work_dt[[TARGET]], nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
+  baseline_formula <- make_formula(TARGET, character(0), zero_formula_rhs = ZERO_INFLATION_FORMULA)
+  baseline_eval <- evaluate_formula_cv(work_dt, TARGET, fold_ids, baseline_formula, metric = METRIC_TO_OPTIMIZE)
+  if (!isTRUE(baseline_eval$ok)) {
+    stop("The intercept-only ZINB baseline failed: ", baseline_eval$reason, call. = FALSE)
+  }
+  current_best_score <- baseline_eval$score
+  safe_write_csv(baseline_eval$overall, file.path(OUTPUT_DIR, "zinb_baseline_overall_metrics.csv"))
 
-baseline_formula <- make_formula(TARGET, character(0), zero_formula_rhs = ZERO_INFLATION_FORMULA)
-baseline_eval <- evaluate_formula_cv(work_dt, TARGET, fold_ids, baseline_formula, metric = METRIC_TO_OPTIMIZE)
-if (!isTRUE(baseline_eval$ok)) {
-  stop("The intercept-only ZINB baseline failed: ", baseline_eval$reason, call. = FALSE)
-}
-current_best_score <- baseline_eval$score
-safe_write_csv(baseline_eval$overall, file.path(OUTPUT_DIR, "zinb_baseline_overall_metrics.csv"))
+  selected <- character(0)
+  selected_terms <- character(0)
+  selected_transforms <- character(0)
+  search_log <- list()
+  failure_log <- list()
+  best_step_results <- list()
 
-selected <- character(0)
-selected_terms <- character(0)
-selected_transforms <- character(0)
-search_log <- list()
-failure_log <- list()
-best_step_results <- list()
+  max_steps <- min(length(predictor_pool), MAX_VARS)
 
-max_steps <- min(length(predictor_pool), MAX_VARS)
+  for (step_i in seq_len(max_steps)) {
+    remaining <- setdiff(predictor_pool, selected)
+    if (length(remaining) == 0) break
 
-for (step_i in seq_len(max_steps)) {
-  remaining <- setdiff(predictor_pool, selected)
-  if (length(remaining) == 0) break
+    candidate_specs <- list()
+    spec_idx <- 1L
 
-  candidate_specs <- list()
-  spec_idx <- 1L
+    for (v in remaining) {
+      tfms <- valid_transformations(work_dt[[v]])
+      if (length(tfms) == 0) {
+        failure_log[[length(failure_log) + 1L]] <- data.table(
+          step = step_i,
+          variable = v,
+          transformation = NA_character_,
+          added_term = NA_character_,
+          formula = NA_character_,
+          reason = "no valid transformation for column type or values"
+        )
+        next
+      }
 
-  for (v in remaining) {
-    tfms <- valid_transformations(work_dt[[v]])
-    if (length(tfms) == 0) {
-      failure_log[[length(failure_log) + 1L]] <- data.table(
-        step = step_i,
-        variable = v,
-        transformation = NA_character_,
-        added_term = NA_character_,
-        formula = NA_character_,
-        reason = "no valid transformation for column type or values"
-      )
-      next
+      for (tfm in tfms) {
+        term <- term_for(v, tfm)
+        terms_now <- c(selected_terms, term)
+        candidate_specs[[spec_idx]] <- list(
+          step = step_i,
+          candidate_order = spec_idx,
+          variable = v,
+          transformation = tfm,
+          term = term,
+          formula_obj = make_formula(TARGET, terms_now, zero_formula_rhs = ZERO_INFLATION_FORMULA)
+        )
+        spec_idx <- spec_idx + 1L
+      }
     }
 
-    for (tfm in tfms) {
-      term <- term_for(v, tfm)
-      terms_now <- c(selected_terms, term)
-      candidate_specs[[spec_idx]] <- list(
-        step = step_i,
-        candidate_order = spec_idx,
-        variable = v,
-        transformation = tfm,
-        term = term,
-        formula_obj = make_formula(TARGET, terms_now, zero_formula_rhs = ZERO_INFLATION_FORMULA)
-      )
-      spec_idx <- spec_idx + 1L
+    results <- evaluate_candidates_parallel(
+      candidate_specs,
+      work_dt = work_dt,
+      target = TARGET,
+      fold_ids = fold_ids,
+      metric = METRIC_TO_OPTIMIZE,
+      workers = N_WORKERS
+    )
+
+    candidates <- Filter(function(x) isTRUE(x$ok), results)
+    failures <- Filter(function(x) !isTRUE(x$ok), results)
+    if (length(failures) > 0) {
+      failure_log <- c(failure_log, lapply(failures, `[[`, "failure"))
     }
-  }
 
-  results <- evaluate_candidates_parallel(
-    candidate_specs,
-    work_dt = work_dt,
-    target = TARGET,
-    fold_ids = fold_ids,
-    metric = METRIC_TO_OPTIMIZE,
-    workers = N_WORKERS
-  )
+    if (length(candidates) == 0) {
+      log_info("No valid candidate found at step ", step_i, ". Stopping.")
+      break
+    }
 
-  candidates <- Filter(function(x) isTRUE(x$ok), results)
-  failures <- Filter(function(x) !isTRUE(x$ok), results)
-  if (length(failures) > 0) {
-    failure_log <- c(failure_log, lapply(failures, `[[`, "failure"))
-  }
+    step_table <- rbindlist(lapply(candidates, `[[`, "summary"), fill = TRUE)
+    order_cols <- intersect(c(METRIC_TO_OPTIMIZE, "mae", "max_error"), names(step_table))
+    order_cols <- c(order_cols, "candidate_order")
+    order_dir <- if (METRIC_TO_OPTIMIZE == "r2") c(-1, rep(1, length(order_cols) - 1L)) else rep(1, length(order_cols))
+    setorderv(step_table, cols = order_cols, order = order_dir)
+    best_row <- step_table[1]
 
-  if (length(candidates) == 0) {
-    log_info("No valid candidate found at step ", step_i, ". Stopping.")
-    break
-  }
+    if (!is_improvement(best_row$optimization_score, current_best_score, METRIC_TO_OPTIMIZE, MIN_IMPROVEMENT)) {
+      log_info("Step ", step_i, " did not improve ", METRIC_TO_OPTIMIZE, " beyond ", sprintf("%.5f", MIN_IMPROVEMENT), ". Stopping.")
+      search_log[[step_i]] <- copy(step_table)
+      break
+    }
 
-  step_table <- rbindlist(lapply(candidates, `[[`, "summary"), fill = TRUE)
-  order_cols <- intersect(c(METRIC_TO_OPTIMIZE, "mae", "max_error"), names(step_table))
-  order_cols <- c(order_cols, "candidate_order")
-  order_dir <- if (METRIC_TO_OPTIMIZE == "r2") c(-1, rep(1, length(order_cols) - 1L)) else rep(1, length(order_cols))
-  setorderv(step_table, cols = order_cols, order = order_dir)
-  best_row <- step_table[1]
+    selected <- c(selected, best_row$variable)
+    selected_terms <- c(selected_terms, best_row$added_term)
+    selected_transforms <- c(selected_transforms, best_row$transformation)
+    current_best_score <- best_row$optimization_score
 
-  if (!is_improvement(best_row$optimization_score, current_best_score, METRIC_TO_OPTIMIZE, MIN_IMPROVEMENT)) {
-    log_info("Step ", step_i, " did not improve ", METRIC_TO_OPTIMIZE, " beyond ", sprintf("%.5f", MIN_IMPROVEMENT), ". Stopping.")
+    best_idx <- which(
+      vapply(candidates, function(x) {
+        identical(x$summary$variable[1], best_row$variable[1]) &&
+          identical(x$summary$transformation[1], best_row$transformation[1])
+      }, logical(1))
+    )[1]
+    best_eval <- candidates[[best_idx]]$eval
+
+    step_summary <- copy(best_row)
+    step_summary[, candidate_order := NULL]
+    step_summary[, selected_variables := paste(selected, collapse = " | ")]
+    step_summary[, selected_terms := paste(selected_terms, collapse = " + ")]
+
     search_log[[step_i]] <- copy(step_table)
-    break
+    best_step_results[[step_i]] <- list(summary = step_summary, eval = best_eval)
+
+    log_info(
+      "Step ", step_i, " selected: ", best_row$variable, " [", best_row$transformation,
+      "] | ", METRIC_TO_OPTIMIZE, " = ", sprintf("%.5f", best_row$optimization_score)
+    )
   }
 
-  selected <- c(selected, best_row$variable)
-  selected_terms <- c(selected_terms, best_row$added_term)
-  selected_transforms <- c(selected_transforms, best_row$transformation)
-  current_best_score <- best_row$optimization_score
+  if (length(search_log) > 0) {
+    safe_write_csv(rbindlist(search_log, fill = TRUE), file.path(OUTPUT_DIR, "zinb_all_candidates_by_step.csv"))
+  }
+  if (length(failure_log) > 0) {
+    safe_write_csv(rbindlist(failure_log, fill = TRUE), file.path(OUTPUT_DIR, "zinb_failed_candidates.csv"))
+  }
 
-  best_idx <- which(
-    vapply(candidates, function(x) {
-      identical(x$summary$variable[1], best_row$variable[1]) &&
-        identical(x$summary$transformation[1], best_row$transformation[1])
-    }, logical(1))
-  )[1]
-  best_eval <- candidates[[best_idx]]$eval
-
-  step_summary <- copy(best_row)
-  step_summary[, candidate_order := NULL]
-  step_summary[, selected_variables := paste(selected, collapse = " | ")]
-  step_summary[, selected_terms := paste(selected_terms, collapse = " + ")]
-
-  search_log[[step_i]] <- copy(step_table)
-  best_step_results[[step_i]] <- list(summary = step_summary, eval = best_eval)
-
-  log_info(
-    "Step ", step_i, " selected: ", best_row$variable, " [", best_row$transformation,
-    "] | ", METRIC_TO_OPTIMIZE, " = ", sprintf("%.5f", best_row$optimization_score)
-  )
-}
-
-if (length(search_log) > 0) {
-  safe_write_csv(rbindlist(search_log, fill = TRUE), file.path(OUTPUT_DIR, "zinb_all_candidates_by_step.csv"))
-}
-if (length(failure_log) > 0) {
-  safe_write_csv(rbindlist(failure_log, fill = TRUE), file.path(OUTPUT_DIR, "zinb_failed_candidates.csv"))
-}
-
-if (length(best_step_results) == 0) {
-  safe_write_csv(baseline_eval$fold_metrics, file.path(OUTPUT_DIR, "zinb_best_global_fold_metrics.csv"))
-  safe_write_csv(baseline_eval$overall, file.path(OUTPUT_DIR, "zinb_best_global_overall_metrics.csv"))
-  safe_write_csv(baseline_eval$predictions, file.path(OUTPUT_DIR, "zinb_best_global_cv_predictions.csv"))
-  log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
-  log_info("No ZINB candidate improved on the intercept-only baseline.")
-  print(baseline_eval$overall)
-  .script_ok <- TRUE
-  invisible(write_run_manifest(
-    output_dir = OUTPUT_DIR,
-    script_name = SCRIPT_NAME,
-    log_state = LOG_STATE,
-    repo_dir = REPO_DIR,
-    packages = SCRIPT_PACKAGES,
-    status = "completed",
-    seed = SEED,
-    data_path = DATA_PATH,
-    feature_cols = FEATURE_COLS,
-    n_workers = N_WORKERS
-  ))
-  stop_logging(LOG_STATE, "completed")
-} else {
-  best_by_step <- rbindlist(lapply(best_step_results, function(x) x$summary), fill = TRUE)
-  best_global_idx <- if (METRIC_TO_OPTIMIZE == "r2") {
-    which.max(best_by_step[[METRIC_TO_OPTIMIZE]])
+  if (length(best_step_results) == 0) {
+    safe_write_csv(baseline_eval$fold_metrics, file.path(OUTPUT_DIR, "zinb_best_global_fold_metrics.csv"))
+    safe_write_csv(baseline_eval$overall, file.path(OUTPUT_DIR, "zinb_best_global_overall_metrics.csv"))
+    safe_write_csv(baseline_eval$predictions, file.path(OUTPUT_DIR, "zinb_best_global_cv_predictions.csv"))
+    log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+    log_info("No ZINB candidate improved on the intercept-only baseline.")
+    print(baseline_eval$overall)
+    .script_ok <- TRUE
   } else {
-    which.min(best_by_step[[METRIC_TO_OPTIMIZE]])
+    best_by_step <- rbindlist(lapply(best_step_results, function(x) x$summary), fill = TRUE)
+    best_global_idx <- if (METRIC_TO_OPTIMIZE == "r2") {
+      which.max(best_by_step[[METRIC_TO_OPTIMIZE]])
+    } else {
+      which.min(best_by_step[[METRIC_TO_OPTIMIZE]])
+    }
+    best_global <- best_step_results[[best_global_idx]]
+
+    safe_write_csv(best_by_step, file.path(OUTPUT_DIR, "zinb_best_model_per_step.csv"))
+    safe_write_csv(best_global$eval$fold_metrics, file.path(OUTPUT_DIR, "zinb_best_global_fold_metrics.csv"))
+    safe_write_csv(best_global$eval$overall, file.path(OUTPUT_DIR, "zinb_best_global_overall_metrics.csv"))
+    safe_write_csv(best_global$eval$predictions, file.path(OUTPUT_DIR, "zinb_best_global_cv_predictions.csv"))
+
+    log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+    log_info("Best global formula:")
+    print(best_global$eval$formula)
+    print(best_global$eval$overall)
+    .script_ok <- TRUE
   }
-  best_global <- best_step_results[[best_global_idx]]
-
-  safe_write_csv(best_by_step, file.path(OUTPUT_DIR, "zinb_best_model_per_step.csv"))
-  safe_write_csv(best_global$eval$fold_metrics, file.path(OUTPUT_DIR, "zinb_best_global_fold_metrics.csv"))
-  safe_write_csv(best_global$eval$overall, file.path(OUTPUT_DIR, "zinb_best_global_overall_metrics.csv"))
-  safe_write_csv(best_global$eval$predictions, file.path(OUTPUT_DIR, "zinb_best_global_cv_predictions.csv"))
-
-  log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
-  log_info("Best global formula:")
-  print(best_global$eval$formula)
-  print(best_global$eval$overall)
-  .script_ok <- TRUE
-  invisible(write_run_manifest(
-    output_dir = OUTPUT_DIR,
-    script_name = SCRIPT_NAME,
-    log_state = LOG_STATE,
-    repo_dir = REPO_DIR,
-    packages = SCRIPT_PACKAGES,
-    status = "completed",
-    seed = SEED,
-    data_path = DATA_PATH,
-    feature_cols = FEATURE_COLS,
-    n_workers = N_WORKERS
-  ))
-  stop_logging(LOG_STATE, "completed")
-}
+}, function() finalize_run(
+  log_state = LOG_STATE,
+  output_dir = OUTPUT_DIR,
+  script_name = SCRIPT_NAME,
+  repo_dir = REPO_DIR,
+  packages = SCRIPT_PACKAGES,
+  status = if (.script_ok) "completed" else "failed",
+  seed = SEED,
+  data_path = DATA_PATH,
+  feature_cols = FEATURE_COLS,
+  n_workers = N_WORKERS
+))

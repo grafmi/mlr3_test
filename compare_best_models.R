@@ -100,73 +100,72 @@ rank_values <- function(values, metric) {
 # =========================
 .script_ok <- FALSE
 LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
+with_run_finalizer({
+  dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+  log_info("Using metric to rank: ", METRIC_TO_RANK)
+  log_info("Using ranger directory: ", normalizePath(RANGER_DIR, mustWork = FALSE))
+  log_info("Using xgb directory: ", normalizePath(XGB_DIR, mustWork = FALSE))
+  log_info("Using zinb directory: ", normalizePath(ZINB_DIR, mustWork = FALSE))
 
-dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
-log_info("Using metric to rank: ", METRIC_TO_RANK)
-log_info("Using ranger directory: ", normalizePath(RANGER_DIR, mustWork = FALSE))
-log_info("Using xgb directory: ", normalizePath(XGB_DIR, mustWork = FALSE))
-log_info("Using zinb directory: ", normalizePath(ZINB_DIR, mustWork = FALSE))
+  ranger_metrics <- read_if_exists(file.path(RANGER_DIR, "ranger_overall_metrics.csv"))
+  ranger_params <- read_if_exists(file.path(RANGER_DIR, "ranger_best_params.csv"))
+  ranger_row <- safe_metrics_row(ranger_metrics, "ranger")
+  ranger_row[, details := collapse_best_params(ranger_params)]
 
-ranger_metrics <- read_if_exists(file.path(RANGER_DIR, "ranger_overall_metrics.csv"))
-ranger_params <- read_if_exists(file.path(RANGER_DIR, "ranger_best_params.csv"))
-ranger_row <- safe_metrics_row(ranger_metrics, "ranger")
-ranger_row[, details := collapse_best_params(ranger_params)]
+  xgb_metrics <- read_if_exists(file.path(XGB_DIR, "xgb_overall_metrics.csv"))
+  xgb_params <- read_if_exists(file.path(XGB_DIR, "xgb_best_params.csv"))
+  xgb_row <- safe_metrics_row(xgb_metrics, "xgb")
+  xgb_row[, details := collapse_best_params(xgb_params)]
 
-xgb_metrics <- read_if_exists(file.path(XGB_DIR, "xgb_overall_metrics.csv"))
-xgb_params <- read_if_exists(file.path(XGB_DIR, "xgb_best_params.csv"))
-xgb_row <- safe_metrics_row(xgb_metrics, "xgb")
-xgb_row[, details := collapse_best_params(xgb_params)]
+  zinb_metrics <- read_if_exists(file.path(ZINB_DIR, "zinb_best_global_overall_metrics.csv"))
+  zinb_steps <- read_if_exists(file.path(ZINB_DIR, "zinb_best_model_per_step.csv"))
+  zinb_row <- safe_metrics_row(zinb_metrics, "zinb")
 
-zinb_metrics <- read_if_exists(file.path(ZINB_DIR, "zinb_best_global_overall_metrics.csv"))
-zinb_steps <- read_if_exists(file.path(ZINB_DIR, "zinb_best_model_per_step.csv"))
-zinb_row <- safe_metrics_row(zinb_metrics, "zinb")
-
-if (!is.null(zinb_steps) && nrow(zinb_steps) > 0) {
-  if (!(METRIC_TO_RANK %in% names(zinb_steps))) {
-    stop(sprintf("METRIC_TO_RANK '%s' not found in ZINB step table.", METRIC_TO_RANK), call. = FALSE)
-  }
-  if (METRIC_TO_RANK == "r2") {
-    setorderv(zinb_steps, cols = c(METRIC_TO_RANK, "mae", "max_error"), order = c(-1, 1, 1))
+  if (!is.null(zinb_steps) && nrow(zinb_steps) > 0) {
+    if (!(METRIC_TO_RANK %in% names(zinb_steps))) {
+      stop(sprintf("METRIC_TO_RANK '%s' not found in ZINB step table.", METRIC_TO_RANK), call. = FALSE)
+    }
+    if (METRIC_TO_RANK == "r2") {
+      setorderv(zinb_steps, cols = c(METRIC_TO_RANK, "mae", "max_error"), order = c(-1, 1, 1))
+    } else {
+      setorderv(zinb_steps, cols = c(METRIC_TO_RANK, "mae", "max_error"), order = c(1, 1, 1))
+    }
+    best_zinb <- zinb_steps[1]
+    zinb_row[, details := sprintf(
+      "step=%s; variable=%s; transformation=%s; formula=%s; selected_terms=%s",
+      best_zinb$step,
+      best_zinb$variable,
+      best_zinb$transformation,
+      best_zinb$formula,
+      best_zinb$selected_terms
+    )]
+  } else if (!is.null(zinb_metrics) && nrow(zinb_metrics) > 0) {
+    zinb_row[, details := "intercept-only baseline; no selected step model found"]
   } else {
-    setorderv(zinb_steps, cols = c(METRIC_TO_RANK, "mae", "max_error"), order = c(1, 1, 1))
+    zinb_row[, details := NA_character_]
   }
-  best_zinb <- zinb_steps[1]
-  zinb_row[, details := sprintf(
-    "step=%s; variable=%s; transformation=%s; formula=%s; selected_terms=%s",
-    best_zinb$step,
-    best_zinb$variable,
-    best_zinb$transformation,
-    best_zinb$formula,
-    best_zinb$selected_terms
-  )]
-} else if (!is.null(zinb_metrics) && nrow(zinb_metrics) > 0) {
-  zinb_row[, details := "intercept-only baseline; no selected step model found"]
-} else {
-  zinb_row[, details := NA_character_]
-}
 
-comparison <- rbindlist(list(ranger_row, xgb_row, zinb_row), fill = TRUE)
+  comparison <- rbindlist(list(ranger_row, xgb_row, zinb_row), fill = TRUE)
 
-if (!(METRIC_TO_RANK %in% names(comparison))) {
-  stop(sprintf("METRIC_TO_RANK '%s' not found in comparison table.", METRIC_TO_RANK), call. = FALSE)
-}
+  if (!(METRIC_TO_RANK %in% names(comparison))) {
+    stop(sprintf("METRIC_TO_RANK '%s' not found in comparison table.", METRIC_TO_RANK), call. = FALSE)
+  }
 
-comparison[, rank := rank_values(get(METRIC_TO_RANK), METRIC_TO_RANK)]
-setorder(comparison, rank, model)
-setcolorder(comparison, c("rank", "model", "rmse", "mae", "max_error", "sae", "mse", "bias", "r2", "details"))
+  comparison[, rank := rank_values(get(METRIC_TO_RANK), METRIC_TO_RANK)]
+  setorder(comparison, rank, model)
+  setcolorder(comparison, c("rank", "model", "rmse", "mae", "max_error", "sae", "mse", "bias", "r2", "details"))
 
-out_path <- file.path(OUTPUT_DIR, "best_models_comparison.csv")
-safe_write_csv(comparison, out_path)
+  out_path <- file.path(OUTPUT_DIR, "best_models_comparison.csv")
+  safe_write_csv(comparison, out_path)
 
-log_info("Done. Comparison written to: ", normalizePath(out_path, mustWork = FALSE))
-print(comparison)
-.script_ok <- TRUE
-invisible(write_run_manifest(
+  log_info("Done. Comparison written to: ", normalizePath(out_path, mustWork = FALSE))
+  print(comparison)
+  .script_ok <- TRUE
+}, function() finalize_run(
+  log_state = LOG_STATE,
   output_dir = OUTPUT_DIR,
   script_name = SCRIPT_NAME,
-  log_state = LOG_STATE,
   repo_dir = REPO_DIR,
   packages = SCRIPT_PACKAGES,
-  status = "completed"
+  status = if (.script_ok) "completed" else "failed"
 ))
-stop_logging(LOG_STATE, "completed")

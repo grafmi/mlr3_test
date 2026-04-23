@@ -8,15 +8,36 @@ CONFIG_RESULTS_ROOT="${CONFIG_RESULTS_ROOT:-results}"
 VERSION_RUNS="${VERSION_RUNS:-true}"
 RUN_ID="${RUN_ID:-}"
 RESULTS_ROOT_DIR="${RESULTS_ROOT_DIR:-$SCRIPT_DIR/$CONFIG_RESULTS_ROOT}"
+RUN_OUTPUT_ROOT="${RUN_OUTPUT_ROOT:-}"
+
+next_available_run_id() {
+  local base_id="$1"
+  local root_dir="$2"
+  local candidate="$base_id"
+  local suffix=1
+
+  while [[ -e "$root_dir/$candidate" ]]; do
+    candidate="$(printf '%s_%02d' "$base_id" "$suffix")"
+    suffix=$((suffix + 1))
+  done
+
+  printf '%s\n' "$candidate"
+}
 
 if [[ -z "$RUN_ID" && "$VERSION_RUNS" == "true" ]]; then
   RUN_ID="$(date '+%Y%m%d_%H%M')"
 fi
 
 if [[ "$VERSION_RUNS" == "true" ]]; then
-  RUN_OUTPUT_ROOT="${RUN_OUTPUT_ROOT:-$RESULTS_ROOT_DIR/$RUN_ID}"
+  if [[ -z "$RUN_OUTPUT_ROOT" ]]; then
+    mkdir -p "$RESULTS_ROOT_DIR"
+    RUN_ID="$(next_available_run_id "$RUN_ID" "$RESULTS_ROOT_DIR")"
+    RUN_OUTPUT_ROOT="$RESULTS_ROOT_DIR/$RUN_ID"
+  fi
 else
-  RUN_OUTPUT_ROOT="${RUN_OUTPUT_ROOT:-$SCRIPT_DIR}"
+  if [[ -z "$RUN_OUTPUT_ROOT" ]]; then
+    RUN_OUTPUT_ROOT="$SCRIPT_DIR"
+  fi
 fi
 
 MLR3_DATA_PATH="${MLR3_DATA_PATH:-$SCRIPT_DIR/testfile_zinb_nonlinear_eintritte.csv}"

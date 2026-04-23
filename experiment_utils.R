@@ -548,6 +548,52 @@ write_run_manifest <- function(output_dir, script_name, log_state, repo_dir,
   manifest
 }
 
+finalize_run <- function(log_state, output_dir, script_name, repo_dir,
+                         packages = character(0), status = "completed",
+                         seed = NA, data_path = NA_character_,
+                         feature_cols = character(0), n_workers = NA) {
+  manifest_error <- NULL
+
+  tryCatch(
+    invisible(write_run_manifest(
+      output_dir = output_dir,
+      script_name = script_name,
+      log_state = log_state,
+      repo_dir = repo_dir,
+      packages = packages,
+      status = status,
+      seed = seed,
+      data_path = data_path,
+      feature_cols = feature_cols,
+      n_workers = n_workers
+    )),
+    error = function(e) {
+      manifest_error <<- conditionMessage(e)
+      NULL
+    }
+  )
+
+  if (!is.null(manifest_error)) {
+    log_info("Warning: failed to write run_manifest: ", manifest_error)
+  }
+
+  stop_logging(log_state, status = status)
+  invisible(NULL)
+}
+
+with_run_finalizer <- function(code, finalizer) {
+  force(finalizer)
+  eval_env <- parent.frame()
+  expr <- substitute(code)
+
+  runner <- function() {
+    on.exit(finalizer(), add = TRUE)
+    eval(expr, envir = eval_env)
+  }
+
+  runner()
+}
+
 write_tabular_dataset <- function(dt, path) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   ext <- file_extension(path)
@@ -674,10 +720,14 @@ start_logging <- function(output_dir, script_name) {
 
 stop_logging <- function(log_state, status = "completed") {
   if (is.null(log_state)) return(invisible(NULL))
+  if (isTRUE(log_state$closed)) return(invisible(NULL))
 
   log_info("Finished with status: ", status)
   if (sink.number(type = "message") > 0) sink(type = "message")
   if (sink.number() > 0) sink()
-  close(log_state$connection)
+  if (!is.null(log_state$connection) && isOpen(log_state$connection)) {
+    close(log_state$connection)
+  }
+  log_state$closed <- TRUE
   invisible(NULL)
 }

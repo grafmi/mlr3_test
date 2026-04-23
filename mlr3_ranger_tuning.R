@@ -71,103 +71,102 @@ N_WORKERS <- get_int_setting("workers", "N_WORKERS", config_value(CONFIG, c("exp
 # =========================
 .script_ok <- FALSE
 LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
+with_run_finalizer({
+  set.seed(SEED)
+  if (N_WORKERS > 1) {
+    future::plan(future::multisession, workers = N_WORKERS)
+  } else {
+    future::plan(future::sequential)
+  }
+  on.exit(future::plan(future::sequential), add = TRUE)
 
-set.seed(SEED)
-if (N_WORKERS > 1) {
-  future::plan(future::multisession, workers = N_WORKERS)
-} else {
-  future::plan(future::sequential)
-}
-on.exit(future::plan(future::sequential), add = TRUE)
+  df <- load_csv_checked(DATA_PATH)
+  work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS)
+  dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
-df <- load_csv_checked(DATA_PATH)
-work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS)
-dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+  log_info("Using data file: ", normalizePath(DATA_PATH, mustWork = FALSE))
+  log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+  log_info("Using features: ", paste(FEATURE_COLS, collapse = ", "))
+  log_info("Using folds / tuning evals / workers: ", N_FOLDS, " / ", TUNE_EVALS, " / ", N_WORKERS)
 
-log_info("Using data file: ", normalizePath(DATA_PATH, mustWork = FALSE))
-log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
-log_info("Using features: ", paste(FEATURE_COLS, collapse = ", "))
-log_info("Using folds / tuning evals / workers: ", N_FOLDS, " / ", TUNE_EVALS, " / ", N_WORKERS)
+  backend <- add_regression_stratum(as.data.frame(work_dt), target = TARGET, n_bins = STRATA_BINS)
+  task <- make_regr_task("ranger_regression", backend = backend, target = TARGET)
+  outer_cv <- make_stratified_custom_cv(task, target = TARGET, nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
 
-backend <- add_regression_stratum(as.data.frame(work_dt), target = TARGET, n_bins = STRATA_BINS)
-task <- make_regr_task("ranger_regression", backend = backend, target = TARGET)
-outer_cv <- make_stratified_custom_cv(task, target = TARGET, nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
-
-learner <- lrn(
-  "regr.ranger",
-  predict_type = "response",
-  importance = "impurity",
-  num.threads = 1,
-  seed = SEED
-)
-
-ranger_space_args <- list(
-  num.trees = p_int(
-    lower = config_value(CONFIG, c("ranger", "search_space", "num_trees"))[[1]],
-    upper = config_value(CONFIG, c("ranger", "search_space", "num_trees"))[[2]]
-  ),
-  mtry = p_int(lower = 1, upper = max(1L, length(task$feature_names))),
-  min.node.size = p_int(
-    lower = config_value(CONFIG, c("ranger", "search_space", "min_node_size"))[[1]],
-    upper = config_value(CONFIG, c("ranger", "search_space", "min_node_size"))[[2]]
-  ),
-  sample.fraction = p_dbl(
-    lower = config_value(CONFIG, c("ranger", "search_space", "sample_fraction"))[[1]],
-    upper = config_value(CONFIG, c("ranger", "search_space", "sample_fraction"))[[2]]
-  ),
-  replace = p_lgl()
-)
-
-if (has_config_value(CONFIG, c("ranger", "search_space", "max_depth"))) {
-  ranger_space_args$max.depth <- p_int(
-    lower = config_value(CONFIG, c("ranger", "search_space", "max_depth"))[[1]],
-    upper = config_value(CONFIG, c("ranger", "search_space", "max_depth"))[[2]]
+  learner <- lrn(
+    "regr.ranger",
+    predict_type = "response",
+    importance = "impurity",
+    num.threads = 1,
+    seed = SEED
   )
-}
 
-if (has_config_value(CONFIG, c("ranger", "search_space", "splitrule"))) {
-  ranger_space_args$splitrule <- p_fct(levels = config_value(CONFIG, c("ranger", "search_space", "splitrule")))
-}
+  ranger_space_args <- list(
+    num.trees = p_int(
+      lower = config_value(CONFIG, c("ranger", "search_space", "num_trees"))[[1]],
+      upper = config_value(CONFIG, c("ranger", "search_space", "num_trees"))[[2]]
+    ),
+    mtry = p_int(lower = 1, upper = max(1L, length(task$feature_names))),
+    min.node.size = p_int(
+      lower = config_value(CONFIG, c("ranger", "search_space", "min_node_size"))[[1]],
+      upper = config_value(CONFIG, c("ranger", "search_space", "min_node_size"))[[2]]
+    ),
+    sample.fraction = p_dbl(
+      lower = config_value(CONFIG, c("ranger", "search_space", "sample_fraction"))[[1]],
+      upper = config_value(CONFIG, c("ranger", "search_space", "sample_fraction"))[[2]]
+    ),
+    replace = p_lgl()
+  )
 
-search_space <- do.call(ps, ranger_space_args)
+  if (has_config_value(CONFIG, c("ranger", "search_space", "max_depth"))) {
+    ranger_space_args$max.depth <- p_int(
+      lower = config_value(CONFIG, c("ranger", "search_space", "max_depth"))[[1]],
+      upper = config_value(CONFIG, c("ranger", "search_space", "max_depth"))[[2]]
+    )
+  }
 
-inner_cv <- rsmp("cv", folds = N_FOLDS)
+  if (has_config_value(CONFIG, c("ranger", "search_space", "splitrule"))) {
+    ranger_space_args$splitrule <- p_fct(levels = config_value(CONFIG, c("ranger", "search_space", "splitrule")))
+  }
 
-at <- auto_tuner(
-  tuner = tnr("random_search"),
-  learner = learner,
-  resampling = inner_cv,
-  measure = msr("regr.rmse"),
-  search_space = search_space,
-  terminator = trm("evals", n_evals = TUNE_EVALS),
-  store_tuning_instance = TRUE,
-  store_models = FALSE
-)
+  search_space <- do.call(ps, ranger_space_args)
 
-rr <- resample(task, at, outer_cv$clone(deep = TRUE), store_models = TRUE)
-predictions <- predictions_from_resample(rr)
-fold_metrics <- fold_metrics_from_predictions(predictions)
-overall_metrics <- aggregate_predictions(predictions)
-best_params <- collect_tuning_results(rr, measure_col = "regr.rmse")
+  inner_cv <- rsmp("cv", folds = N_FOLDS)
 
-safe_write_csv(fold_metrics, file.path(OUTPUT_DIR, "ranger_fold_metrics.csv"))
-safe_write_csv(overall_metrics, file.path(OUTPUT_DIR, "ranger_overall_metrics.csv"))
-safe_write_csv(predictions, file.path(OUTPUT_DIR, "ranger_cv_predictions.csv"))
-safe_write_csv(best_params, file.path(OUTPUT_DIR, "ranger_best_params.csv"))
+  at <- auto_tuner(
+    tuner = tnr("random_search"),
+    learner = learner,
+    resampling = inner_cv,
+    measure = msr("regr.rmse"),
+    search_space = search_space,
+    terminator = trm("evals", n_evals = TUNE_EVALS),
+    store_tuning_instance = TRUE,
+    store_models = FALSE
+  )
 
-log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
-print(overall_metrics)
-.script_ok <- TRUE
-invisible(write_run_manifest(
+  rr <- resample(task, at, outer_cv$clone(deep = TRUE), store_models = TRUE)
+  predictions <- predictions_from_resample(rr)
+  fold_metrics <- fold_metrics_from_predictions(predictions)
+  overall_metrics <- aggregate_predictions(predictions)
+  best_params <- collect_tuning_results(rr, measure_col = "regr.rmse")
+
+  safe_write_csv(fold_metrics, file.path(OUTPUT_DIR, "ranger_fold_metrics.csv"))
+  safe_write_csv(overall_metrics, file.path(OUTPUT_DIR, "ranger_overall_metrics.csv"))
+  safe_write_csv(predictions, file.path(OUTPUT_DIR, "ranger_cv_predictions.csv"))
+  safe_write_csv(best_params, file.path(OUTPUT_DIR, "ranger_best_params.csv"))
+
+  log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+  print(overall_metrics)
+  .script_ok <- TRUE
+}, function() finalize_run(
+  log_state = LOG_STATE,
   output_dir = OUTPUT_DIR,
   script_name = SCRIPT_NAME,
-  log_state = LOG_STATE,
   repo_dir = REPO_DIR,
   packages = SCRIPT_PACKAGES,
-  status = "completed",
+  status = if (.script_ok) "completed" else "failed",
   seed = SEED,
   data_path = DATA_PATH,
   feature_cols = FEATURE_COLS,
   n_workers = N_WORKERS
 ))
-stop_logging(LOG_STATE, "completed")

@@ -198,71 +198,70 @@ metadata_output_table <- function(dataset_files, metadata_prefix) {
 # =========================
 .script_ok <- FALSE
 LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
+with_run_finalizer({
+  dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
-dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+  log_info("Using input file: ", normalizePath(INPUT_PATH, mustWork = FALSE))
+  log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+  log_info("Using output basename: ", OUTPUT_BASENAME)
+  log_info("Using output formats: ", paste(OUTPUT_FORMATS, collapse = ", "))
+  if (nzchar(trimws(ROW_FILTER))) log_info("Using row filter: ", ROW_FILTER)
+  if (length(KEEP_COLS) > 0) log_info("Keeping columns: ", paste(KEEP_COLS, collapse = ", "))
+  if (length(DROP_COLS) > 0) log_info("Dropping columns: ", paste(DROP_COLS, collapse = ", "))
+  log_info("Drop rows with missing values: ", DROP_MISSING_ROWS)
+  log_info("Convert character columns to factors: ", CHARS_TO_FACTORS)
+  log_info("Minimum count for rare factor level warning: ", FACTOR_MIN_COUNT)
 
-log_info("Using input file: ", normalizePath(INPUT_PATH, mustWork = FALSE))
-log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
-log_info("Using output basename: ", OUTPUT_BASENAME)
-log_info("Using output formats: ", paste(OUTPUT_FORMATS, collapse = ", "))
-if (nzchar(trimws(ROW_FILTER))) log_info("Using row filter: ", ROW_FILTER)
-if (length(KEEP_COLS) > 0) log_info("Keeping columns: ", paste(KEEP_COLS, collapse = ", "))
-if (length(DROP_COLS) > 0) log_info("Dropping columns: ", paste(DROP_COLS, collapse = ", "))
-log_info("Drop rows with missing values: ", DROP_MISSING_ROWS)
-log_info("Convert character columns to factors: ", CHARS_TO_FACTORS)
-log_info("Minimum count for rare factor level warning: ", FACTOR_MIN_COUNT)
+  original_dt <- load_tabular_data_checked(INPUT_PATH)
+  validate_preprocess_settings(original_dt, KEEP_COLS, DROP_COLS, OUTPUT_FORMATS)
 
-original_dt <- load_tabular_data_checked(INPUT_PATH)
-validate_preprocess_settings(original_dt, KEEP_COLS, DROP_COLS, OUTPUT_FORMATS)
+  processed_dt <- apply_keep_drop_columns(original_dt, KEEP_COLS, DROP_COLS)
+  processed_dt <- apply_row_filter(processed_dt, ROW_FILTER)
+  if (CHARS_TO_FACTORS) {
+    processed_dt <- coerce_character_columns_to_factor(processed_dt)
+  }
+  drop_result <- drop_missing_rows_if_requested(processed_dt, DROP_MISSING_ROWS)
+  processed_dt <- drop_result$data
+  processed_dt <- drop_unused_factor_levels(processed_dt)
 
-processed_dt <- apply_keep_drop_columns(original_dt, KEEP_COLS, DROP_COLS)
-processed_dt <- apply_row_filter(processed_dt, ROW_FILTER)
-if (CHARS_TO_FACTORS) {
-  processed_dt <- coerce_character_columns_to_factor(processed_dt)
-}
-drop_result <- drop_missing_rows_if_requested(processed_dt, DROP_MISSING_ROWS)
-processed_dt <- drop_result$data
-processed_dt <- drop_unused_factor_levels(processed_dt)
+  if (nrow(processed_dt) == 0) {
+    stop("No rows remain after preprocessing.", call. = FALSE)
+  }
 
-if (nrow(processed_dt) == 0) {
-  stop("No rows remain after preprocessing.", call. = FALSE)
-}
+  if (drop_result$rows_dropped > 0) {
+    log_info("Dropped ", drop_result$rows_dropped, " row(s) with missing values during preprocessing.")
+  }
 
-if (drop_result$rows_dropped > 0) {
-  log_info("Dropped ", drop_result$rows_dropped, " row(s) with missing values during preprocessing.")
-}
+  validate_factor_columns(processed_dt, min_level_count = FACTOR_MIN_COUNT, context = "preprocessed data")
 
-validate_factor_columns(processed_dt, min_level_count = FACTOR_MIN_COUNT, context = "preprocessed data")
+  dataset_files <- write_dataset_formats(processed_dt, OUTPUT_DIR, OUTPUT_BASENAME, OUTPUT_FORMATS)
+  metadata_prefix <- paste0(OUTPUT_BASENAME, "_metadata")
+  output_files <- metadata_output_table(dataset_files, metadata_prefix)
 
-dataset_files <- write_dataset_formats(processed_dt, OUTPUT_DIR, OUTPUT_BASENAME, OUTPUT_FORMATS)
-metadata_prefix <- paste0(OUTPUT_BASENAME, "_metadata")
-output_files <- metadata_output_table(dataset_files, metadata_prefix)
+  metadata <- build_dataset_metadata(
+    original_dt = original_dt,
+    processed_dt = processed_dt,
+    source_path = INPUT_PATH,
+    filter_expression = ROW_FILTER,
+    keep_cols = KEEP_COLS,
+    drop_cols = DROP_COLS,
+    drop_missing_rows = DROP_MISSING_ROWS,
+    output_files = output_files
+  )
+  write_metadata_bundle(metadata, OUTPUT_DIR, prefix = metadata_prefix)
 
-metadata <- build_dataset_metadata(
-  original_dt = original_dt,
-  processed_dt = processed_dt,
-  source_path = INPUT_PATH,
-  filter_expression = ROW_FILTER,
-  keep_cols = KEEP_COLS,
-  drop_cols = DROP_COLS,
-  drop_missing_rows = DROP_MISSING_ROWS,
-  output_files = output_files
-)
-write_metadata_bundle(metadata, OUTPUT_DIR, prefix = metadata_prefix)
+  log_info("Rows before / after: ", nrow(original_dt), " / ", nrow(processed_dt))
+  log_info("Columns before / after: ", ncol(original_dt), " / ", ncol(processed_dt))
+  log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+  print(metadata$summary)
 
-log_info("Rows before / after: ", nrow(original_dt), " / ", nrow(processed_dt))
-log_info("Columns before / after: ", ncol(original_dt), " / ", ncol(processed_dt))
-log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
-print(metadata$summary)
-
-.script_ok <- TRUE
-invisible(write_run_manifest(
+  .script_ok <- TRUE
+}, function() finalize_run(
+  log_state = LOG_STATE,
   output_dir = OUTPUT_DIR,
   script_name = SCRIPT_NAME,
-  log_state = LOG_STATE,
   repo_dir = REPO_DIR,
   packages = SCRIPT_PACKAGES,
-  status = "completed",
+  status = if (.script_ok) "completed" else "failed",
   data_path = INPUT_PATH
 ))
-stop_logging(LOG_STATE, "completed")
