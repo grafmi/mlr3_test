@@ -86,6 +86,80 @@ get_bool_setting <- function(arg_name, env_name, default = FALSE) {
   stop(sprintf("Setting '%s' must be TRUE/FALSE.", arg_name), call. = FALSE)
 }
 
+coerce_character_columns_to_factor <- function(dt, exclude_cols = character(0)) {
+  out <- data.table::copy(dt)
+  candidate_cols <- setdiff(names(out), exclude_cols)
+  char_cols <- names(which(vapply(out[, ..candidate_cols], is.character, logical(1))))
+  if (length(char_cols) > 0) {
+    out[, (char_cols) := lapply(.SD, factor), .SDcols = char_cols]
+  }
+  out
+}
+
+drop_unused_factor_levels <- function(dt) {
+  out <- data.table::copy(dt)
+  factor_cols <- names(which(vapply(out, is.factor, logical(1))))
+  if (length(factor_cols) > 0) {
+    out[, (factor_cols) := lapply(.SD, droplevels), .SDcols = factor_cols]
+  }
+  out
+}
+
+validate_factor_columns <- function(dt, min_level_count = 5L, context = "dataset") {
+  factor_cols <- names(which(vapply(dt, is.factor, logical(1))))
+  if (length(factor_cols) == 0) {
+    return(invisible(list(single_level = character(0), rare_levels = data.table::data.table())))
+  }
+
+  single_level <- character(0)
+  rare_levels <- vector("list", length = 0L)
+
+  for (col in factor_cols) {
+    values <- droplevels(dt[[col]])
+    level_counts <- table(values, useNA = "no")
+
+    if (length(level_counts) <= 1L) {
+      single_level <- c(single_level, col)
+      next
+    }
+
+    rare <- level_counts[level_counts < min_level_count]
+    if (length(rare) > 0) {
+      rare_levels[[length(rare_levels) + 1L]] <- data.table::data.table(
+        column = col,
+        level = names(rare),
+        count = as.integer(rare)
+      )
+    }
+  }
+
+  if (length(single_level) > 0) {
+    stop(
+      "Factor column(s) with fewer than 2 observed levels found in ",
+      context,
+      ": ",
+      paste(single_level, collapse = ", "),
+      ". Remove them, filter differently, or convert them before modeling.",
+      call. = FALSE
+    )
+  }
+
+  rare_levels_dt <- data.table::rbindlist(rare_levels, fill = TRUE)
+  if (nrow(rare_levels_dt) > 0) {
+    warning(
+      "Rare factor levels found in ",
+      context,
+      " (count < ",
+      min_level_count,
+      "): ",
+      paste(sprintf("%s=%s (%s)", rare_levels_dt$column, rare_levels_dt$level, rare_levels_dt$count), collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  invisible(list(single_level = single_level, rare_levels = rare_levels_dt))
+}
+
 file_extension <- function(path) {
   tolower(tools::file_ext(path))
 }
@@ -217,10 +291,7 @@ prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(
     }
   }
 
-  char_cols <- names(which(vapply(dt, is.character, logical(1))))
-  if (length(char_cols) > 0) {
-    dt[, (char_cols) := lapply(.SD, factor), .SDcols = char_cols]
-  }
+  dt <- coerce_character_columns_to_factor(dt)
 
   rows_before <- nrow(dt)
   dt <- stats::na.omit(dt)
@@ -229,6 +300,9 @@ prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(
     message(sprintf("Dropped %s row(s) with missing values.", rows_dropped))
   }
   if (nrow(dt) == 0) stop("No rows remain after removing missing values.", call. = FALSE)
+
+  dt <- drop_unused_factor_levels(dt)
+  validate_factor_columns(dt, min_level_count = 5L, context = "modeling data")
 
   dt
 }
@@ -458,6 +532,7 @@ build_dataset_metadata <- function(original_dt, processed_dt, source_path,
       column = col,
       class = paste(class(values), collapse = ", "),
       typeof = typeof(values),
+      n_levels = if (is.factor(values)) nlevels(values) else NA_integer_,
       n_missing = sum(is.na(values)),
       pct_missing = mean(is.na(values)),
       n_unique = data.table::uniqueN(values, na.rm = FALSE),

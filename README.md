@@ -137,6 +137,7 @@ Common command-line overrides:
 ```sh
 Rscript preprocess_data.R --input=/path/to/data.rds --formats=csv,rds --filter="n_eintritte >= 0"
 Rscript preprocess_data.R --keep-cols=n_eintritte,prcrank --drop-missing-rows=true
+Rscript preprocess_data.R --chars-to-factors=true --factor-min-count=5
 Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --tune-evals=20 --workers=4
 Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
 Rscript zinb_stepwise_cv.R --metric=rmse --max-vars=3 --workers=4
@@ -146,10 +147,12 @@ Rscript compare_best_models.R --metric=rmse
 The same settings can be controlled with environment variables, for example
 `INPUT_DATA_PATH`, `PREPROCESS_OUTPUT_DIR`, `PREPROCESS_OUTPUT_NAME`,
 `PREPROCESS_OUTPUT_FORMATS`, `PREPROCESS_FILTER`, `PREPROCESS_KEEP_COLS`,
-`PREPROCESS_DROP_COLS`, `PREPROCESS_DROP_MISSING_ROWS`, `MLR3_DATA_PATH`,
-`N_FOLDS`, `TUNE_EVALS`, `N_WORKERS`, `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`,
-`ZINB_OUTPUT_DIR`, and `COMPARISON_OUTPUT_DIR`. ZINB also supports
-`ZINB_WORKERS`, which takes precedence over `N_WORKERS` for that script.
+`PREPROCESS_DROP_COLS`, `PREPROCESS_DROP_MISSING_ROWS`,
+`PREPROCESS_CHARS_TO_FACTORS`, `PREPROCESS_FACTOR_MIN_COUNT`,
+`MLR3_DATA_PATH`, `N_FOLDS`, `TUNE_EVALS`, `N_WORKERS`,
+`RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
+`COMPARISON_OUTPUT_DIR`. ZINB also supports `ZINB_WORKERS`, which takes
+precedence over `N_WORKERS` for that script.
 
 Example preprocessing runs:
 
@@ -239,3 +242,14 @@ outputs_preprocessed/preprocessed_dataset_metadata_files.rds
 outputs_preprocessed/preprocessed_dataset_metadata.rds
 outputs_preprocessed/preprocess_data.log
 ```
+
+Factor handling policy:
+
+- `preprocess_data.R` converts `character` columns to `factor` by default
+  (`--chars-to-factors=true`)
+- unused factor levels are dropped after filtering
+- factors with fewer than 2 observed levels stop the run with an explicit error
+- rare factor levels trigger warnings; the default threshold is
+  `--factor-min-count=5`
+- the modeling scripts keep factors for `ranger` and ZINB, while XGBoost encodes
+  factors into dummy variables before fitting

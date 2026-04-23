@@ -49,6 +49,8 @@ ROW_FILTER <- get_setting("filter", "PREPROCESS_FILTER", "")
 KEEP_COLS <- parse_csv_setting(get_setting("keep-cols", "PREPROCESS_KEEP_COLS", ""))
 DROP_COLS <- parse_csv_setting(get_setting("drop-cols", "PREPROCESS_DROP_COLS", ""))
 DROP_MISSING_ROWS <- get_bool_setting("drop-missing-rows", "PREPROCESS_DROP_MISSING_ROWS", FALSE)
+CHARS_TO_FACTORS <- get_bool_setting("chars-to-factors", "PREPROCESS_CHARS_TO_FACTORS", TRUE)
+FACTOR_MIN_COUNT <- get_int_setting("factor-min-count", "PREPROCESS_FACTOR_MIN_COUNT", 5, min_value = 1)
 
 # =========================
 # Helpers
@@ -185,14 +187,20 @@ if (nzchar(trimws(ROW_FILTER))) log_info("Using row filter: ", ROW_FILTER)
 if (length(KEEP_COLS) > 0) log_info("Keeping columns: ", paste(KEEP_COLS, collapse = ", "))
 if (length(DROP_COLS) > 0) log_info("Dropping columns: ", paste(DROP_COLS, collapse = ", "))
 log_info("Drop rows with missing values: ", DROP_MISSING_ROWS)
+log_info("Convert character columns to factors: ", CHARS_TO_FACTORS)
+log_info("Minimum count for rare factor level warning: ", FACTOR_MIN_COUNT)
 
 original_dt <- load_tabular_data_checked(INPUT_PATH)
 validate_preprocess_settings(original_dt, KEEP_COLS, DROP_COLS, OUTPUT_FORMATS)
 
 processed_dt <- apply_keep_drop_columns(original_dt, KEEP_COLS, DROP_COLS)
 processed_dt <- apply_row_filter(processed_dt, ROW_FILTER)
+if (CHARS_TO_FACTORS) {
+  processed_dt <- coerce_character_columns_to_factor(processed_dt)
+}
 drop_result <- drop_missing_rows_if_requested(processed_dt, DROP_MISSING_ROWS)
 processed_dt <- drop_result$data
+processed_dt <- drop_unused_factor_levels(processed_dt)
 
 if (nrow(processed_dt) == 0) {
   stop("No rows remain after preprocessing.", call. = FALSE)
@@ -201,6 +209,8 @@ if (nrow(processed_dt) == 0) {
 if (drop_result$rows_dropped > 0) {
   log_info("Dropped ", drop_result$rows_dropped, " row(s) with missing values during preprocessing.")
 }
+
+validate_factor_columns(processed_dt, min_level_count = FACTOR_MIN_COUNT, context = "preprocessed data")
 
 dataset_files <- write_dataset_formats(processed_dt, OUTPUT_DIR, OUTPUT_BASENAME, OUTPUT_FORMATS)
 metadata_prefix <- paste0(OUTPUT_BASENAME, "_metadata")
