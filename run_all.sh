@@ -4,11 +4,26 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+CONFIG_RESULTS_ROOT="${CONFIG_RESULTS_ROOT:-results}"
+VERSION_RUNS="${VERSION_RUNS:-true}"
+RUN_ID="${RUN_ID:-}"
+RESULTS_ROOT_DIR="${RESULTS_ROOT_DIR:-$SCRIPT_DIR/$CONFIG_RESULTS_ROOT}"
+
+if [[ -z "$RUN_ID" && "$VERSION_RUNS" == "true" ]]; then
+  RUN_ID="$(date '+%Y%m%d_%H%M')"
+fi
+
+if [[ "$VERSION_RUNS" == "true" ]]; then
+  RUN_OUTPUT_ROOT="${RUN_OUTPUT_ROOT:-$RESULTS_ROOT_DIR/$RUN_ID}"
+else
+  RUN_OUTPUT_ROOT="${RUN_OUTPUT_ROOT:-$SCRIPT_DIR}"
+fi
+
 MLR3_DATA_PATH="${MLR3_DATA_PATH:-$SCRIPT_DIR/testfile_zinb_nonlinear_eintritte.csv}"
-RANGER_OUTPUT_DIR="${RANGER_OUTPUT_DIR:-$SCRIPT_DIR/outputs_ranger}"
-XGB_OUTPUT_DIR="${XGB_OUTPUT_DIR:-$SCRIPT_DIR/outputs_xgb}"
-ZINB_OUTPUT_DIR="${ZINB_OUTPUT_DIR:-$SCRIPT_DIR/outputs_zinb}"
-COMPARISON_OUTPUT_DIR="${COMPARISON_OUTPUT_DIR:-$SCRIPT_DIR/outputs_model_comparison}"
+RANGER_OUTPUT_DIR="${RANGER_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_ranger}"
+XGB_OUTPUT_DIR="${XGB_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_xgb}"
+ZINB_OUTPUT_DIR="${ZINB_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_zinb}"
+COMPARISON_OUTPUT_DIR="${COMPARISON_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_model_comparison}"
 
 run_step() {
   local label="$1"
@@ -35,6 +50,11 @@ export MLR3_DATA_PATH
 
 echo "Repository directory: $SCRIPT_DIR"
 echo "Data file: $MLR3_DATA_PATH"
+echo "Version runs: $VERSION_RUNS"
+if [[ "$VERSION_RUNS" == "true" ]]; then
+  echo "Run ID: $RUN_ID"
+fi
+echo "Run output root: $RUN_OUTPUT_ROOT"
 echo "Ranger output: $RANGER_OUTPUT_DIR"
 echo "XGBoost output: $XGB_OUTPUT_DIR"
 echo "ZINB output: $ZINB_OUTPUT_DIR"

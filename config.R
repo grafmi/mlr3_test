@@ -17,6 +17,11 @@ CONFIG <- list(
     n_workers = 1L
   ),
 
+  results = list(
+    root_dir = "results",
+    version_runs = TRUE
+  ),
+
   preprocess = list(
     output_dir = "outputs_preprocessed",
     output_name = "preprocessed_dataset",

@@ -133,6 +133,30 @@ For Linux, you can also run the complete pipeline with:
 The wrapper resolves paths relative to the repository, checks that `Rscript` and
 the input data exist, then runs the four scripts in sequence.
 
+By default, `run_all.sh` versions each full run under a timestamped directory:
+
+```text
+results/YYYYMMDD_HHMM/
+```
+
+For example:
+
+```text
+results/20260423_2055/outputs_ranger/
+results/20260423_2055/outputs_xgb/
+results/20260423_2055/outputs_zinb/
+results/20260423_2055/outputs_model_comparison/
+```
+
+Useful overrides:
+
+```sh
+./run_all.sh
+VERSION_RUNS=false ./run_all.sh
+RUN_ID=baseline_a ./run_all.sh
+RESULTS_ROOT_DIR=/tmp/my_results ./run_all.sh
+```
+
 The scripts also work when sourced interactively from VS Code, RStudio Pro, or
 Positron, as long as `experiment_utils.R` is either next to the script or in the
 current working directory.
