@@ -163,5 +163,10 @@ CONFIG <- list(
     ranger_dir = "outputs_ranger",
     xgb_dir = "outputs_xgb",
     zinb_dir = "outputs_zinb"
+  ),
+
+  validation = list(
+    # Output directory for repository smoke checks.
+    output_dir = "outputs_validation"
   )
 )

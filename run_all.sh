@@ -45,6 +45,7 @@ RANGER_OUTPUT_DIR="${RANGER_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_ranger}"
 XGB_OUTPUT_DIR="${XGB_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_xgb}"
 ZINB_OUTPUT_DIR="${ZINB_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_zinb}"
 COMPARISON_OUTPUT_DIR="${COMPARISON_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_model_comparison}"
+RUN_SUMMARY_OUTPUT_DIR="${RUN_SUMMARY_OUTPUT_DIR:-$RUN_OUTPUT_ROOT}"
 
 run_step() {
   local label="$1"
@@ -68,6 +69,8 @@ export XGB_OUTPUT_DIR
 export ZINB_OUTPUT_DIR
 export COMPARISON_OUTPUT_DIR
 export MLR3_DATA_PATH
+export RUN_OUTPUT_ROOT
+export RUN_SUMMARY_OUTPUT_DIR
 
 echo "Repository directory: $SCRIPT_DIR"
 echo "Data file: $MLR3_DATA_PATH"
@@ -80,10 +83,12 @@ echo "Ranger output: $RANGER_OUTPUT_DIR"
 echo "XGBoost output: $XGB_OUTPUT_DIR"
 echo "ZINB output: $ZINB_OUTPUT_DIR"
 echo "Comparison output: $COMPARISON_OUTPUT_DIR"
+echo "Run summary output: $RUN_SUMMARY_OUTPUT_DIR"
 
 run_step "Running ranger tuning" Rscript "$SCRIPT_DIR/mlr3_ranger_tuning.R"
 run_step "Running xgboost tuning" Rscript "$SCRIPT_DIR/mlr3_xgb_tuning.R"
 run_step "Running ZINB stepwise CV" Rscript "$SCRIPT_DIR/zinb_stepwise_cv.R"
 run_step "Comparing best models" Rscript "$SCRIPT_DIR/compare_best_models.R"
+run_step "Writing run summary" Rscript "$SCRIPT_DIR/write_run_summary.R"
 
 printf '\n[%s] Full run completed successfully.\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"

@@ -49,14 +49,6 @@ METRIC_TO_RANK <- get_setting("metric", "METRIC_TO_RANK", config_value(CONFIG, c
 # =========================
 # Helpers
 # =========================
-read_if_exists <- function(path) {
-  if (!file.exists(path)) {
-    message("Missing optional input: ", normalizePath(path, mustWork = FALSE))
-    return(NULL)
-  }
-  fread(path)
-}
-
 safe_metrics_row <- function(dt, model_name) {
   needed <- c("rmse", "mae", "max_error", "sae", "mse", "bias", "r2")
   out <- data.table(model = model_name)
@@ -107,19 +99,35 @@ with_run_finalizer({
   log_info("Using xgb directory: ", normalizePath(XGB_DIR, mustWork = FALSE))
   log_info("Using zinb directory: ", normalizePath(ZINB_DIR, mustWork = FALSE))
 
-  ranger_metrics <- read_if_exists(file.path(RANGER_DIR, "ranger_overall_metrics.csv"))
-  ranger_params <- read_if_exists(file.path(RANGER_DIR, "ranger_best_params.csv"))
+  ranger_status <- manifest_status_summary(
+    RANGER_DIR,
+    required_files = c("ranger_overall_metrics.csv", "ranger_best_params.csv")
+  )
+  xgb_status <- manifest_status_summary(
+    XGB_DIR,
+    required_files = c("xgb_overall_metrics.csv", "xgb_best_params.csv")
+  )
+  zinb_status <- manifest_status_summary(
+    ZINB_DIR,
+    required_files = c("zinb_best_global_overall_metrics.csv", "zinb_best_model_per_step.csv")
+  )
+
+  ranger_metrics <- read_csv_if_exists(file.path(RANGER_DIR, "ranger_overall_metrics.csv"))
+  ranger_params <- read_csv_if_exists(file.path(RANGER_DIR, "ranger_best_params.csv"))
   ranger_row <- safe_metrics_row(ranger_metrics, "ranger")
+  ranger_row <- cbind(ranger_row, ranger_status[, .(availability_status, availability_reason, manifest_status)])
   ranger_row[, details := collapse_best_params(ranger_params)]
 
-  xgb_metrics <- read_if_exists(file.path(XGB_DIR, "xgb_overall_metrics.csv"))
-  xgb_params <- read_if_exists(file.path(XGB_DIR, "xgb_best_params.csv"))
+  xgb_metrics <- read_csv_if_exists(file.path(XGB_DIR, "xgb_overall_metrics.csv"))
+  xgb_params <- read_csv_if_exists(file.path(XGB_DIR, "xgb_best_params.csv"))
   xgb_row <- safe_metrics_row(xgb_metrics, "xgb")
+  xgb_row <- cbind(xgb_row, xgb_status[, .(availability_status, availability_reason, manifest_status)])
   xgb_row[, details := collapse_best_params(xgb_params)]
 
-  zinb_metrics <- read_if_exists(file.path(ZINB_DIR, "zinb_best_global_overall_metrics.csv"))
-  zinb_steps <- read_if_exists(file.path(ZINB_DIR, "zinb_best_model_per_step.csv"))
+  zinb_metrics <- read_csv_if_exists(file.path(ZINB_DIR, "zinb_best_global_overall_metrics.csv"))
+  zinb_steps <- read_csv_if_exists(file.path(ZINB_DIR, "zinb_best_model_per_step.csv"))
   zinb_row <- safe_metrics_row(zinb_metrics, "zinb")
+  zinb_row <- cbind(zinb_row, zinb_status[, .(availability_status, availability_reason, manifest_status)])
 
   if (!is.null(zinb_steps) && nrow(zinb_steps) > 0) {
     if (!(METRIC_TO_RANK %in% names(zinb_steps))) {
@@ -146,14 +154,32 @@ with_run_finalizer({
   }
 
   comparison <- rbindlist(list(ranger_row, xgb_row, zinb_row), fill = TRUE)
+  unavailable_models <- comparison[availability_status != "ok", .(model, availability_status, availability_reason)]
+  if (nrow(unavailable_models) > 0) {
+    log_info("Model inputs with issues:")
+    for (i in seq_len(nrow(unavailable_models))) {
+      log_info(
+        " - ", unavailable_models$model[[i]], ": ",
+        unavailable_models$availability_status[[i]], " (",
+        unavailable_models$availability_reason[[i]], ")"
+      )
+    }
+  }
 
   if (!(METRIC_TO_RANK %in% names(comparison))) {
     stop(sprintf("METRIC_TO_RANK '%s' not found in comparison table.", METRIC_TO_RANK), call. = FALSE)
   }
 
+  if (all(is.na(comparison[[METRIC_TO_RANK]]))) {
+    stop("No comparable model metric values were found. Check the per-model output directories and run manifests.", call. = FALSE)
+  }
+
   comparison[, rank := rank_values(get(METRIC_TO_RANK), METRIC_TO_RANK)]
   setorder(comparison, rank, model)
-  setcolorder(comparison, c("rank", "model", "rmse", "mae", "max_error", "sae", "mse", "bias", "r2", "details"))
+  setcolorder(comparison, c(
+    "rank", "model", "availability_status", "availability_reason", "manifest_status",
+    "rmse", "mae", "max_error", "sae", "mse", "bias", "r2", "details"
+  ))
 
   out_path <- file.path(OUTPUT_DIR, "best_models_comparison.csv")
   safe_write_csv(comparison, out_path)

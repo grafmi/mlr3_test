@@ -548,6 +548,53 @@ write_run_manifest <- function(output_dir, script_name, log_state, repo_dir,
   manifest
 }
 
+read_csv_if_exists <- function(path) {
+  if (!file.exists(path)) return(NULL)
+  data.table::fread(path)
+}
+
+manifest_status_summary <- function(output_dir, required_files = character(0)) {
+  manifest_path <- file.path(output_dir, "run_manifest.csv")
+  manifest <- read_csv_if_exists(manifest_path)
+
+  missing_files <- required_files[!file.exists(file.path(output_dir, required_files))]
+  manifest_status <- if (!is.null(manifest) && "status" %in% names(manifest) && nrow(manifest) > 0) {
+    as.character(manifest$status[[1]])
+  } else {
+    NA_character_
+  }
+
+  status <- "ok"
+  reason <- "required files present"
+
+  if (!file.exists(output_dir)) {
+    status <- "missing_directory"
+    reason <- "output directory does not exist"
+  } else if (is.null(manifest)) {
+    if (length(missing_files) == length(required_files)) {
+      status <- "missing_outputs"
+      reason <- "run manifest and required output files are missing"
+    } else {
+      status <- "incomplete_outputs"
+      reason <- "required files exist but run manifest is missing"
+    }
+  } else if (!identical(manifest_status, "completed")) {
+    status <- "failed_run"
+    reason <- sprintf("run manifest status is '%s'", manifest_status)
+  } else if (length(missing_files) > 0) {
+    status <- "incomplete_outputs"
+    reason <- paste("missing required file(s):", paste(missing_files, collapse = ", "))
+  }
+
+  data.table::data.table(
+    output_dir = normalizePath(output_dir, mustWork = FALSE),
+    manifest_path = normalizePath(manifest_path, mustWork = FALSE),
+    manifest_status = manifest_status,
+    availability_status = status,
+    availability_reason = reason
+  )
+}
+
 finalize_run <- function(log_state, output_dir, script_name, repo_dir,
                          packages = character(0), status = "completed",
                          seed = NA, data_path = NA_character_,

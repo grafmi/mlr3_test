@@ -16,8 +16,9 @@ arguments and environment variables.
 For most users, these are the main steps:
 
 1. Adjust the dataset path and core experiment settings in `config.R`
-2. Run the full pipeline on Linux with `./run_all.sh`
-3. Inspect the versioned output folder under `results/YYYYMMDD_HHMM/`
+2. Optionally run `Rscript validate_repo.R` for a quick smoke check
+3. Run the full pipeline on Linux with `./run_all.sh`
+4. Inspect the versioned output folder under `results/YYYYMMDD_HHMM/`
 
 Typical example:
 
@@ -32,6 +33,7 @@ CONFIG$experiment$inner_folds <- 5L
 Then run:
 
 ```sh
+Rscript validate_repo.R
 ./run_all.sh
 ```
 
@@ -49,6 +51,7 @@ The most relevant outputs per script are:
 - `mlr3_xgb_tuning.R`: nested CV for `xgboost` regression with hyperparameter tuning
 - `zinb_stepwise_cv.R`: stratified 10-fold CV with forward selection for a ZINB model
 - `compare_best_models.R`: read the best model outputs and create a ranked comparison
+- `validate_repo.R`: quick repository smoke check for packages, config, data, and output paths
 
 ## Validation Design
 
@@ -165,6 +168,7 @@ Typical usage from the repository root:
 
 ```sh
 Rscript preprocess_data.R
+Rscript validate_repo.R
 Rscript mlr3_ranger_tuning.R
 Rscript mlr3_xgb_tuning.R
 Rscript zinb_stepwise_cv.R
@@ -179,6 +183,8 @@ For Linux, you can also run the complete pipeline with:
 
 The wrapper resolves paths relative to the repository, checks that `Rscript` and
 the input data exist, then runs the four scripts in sequence.
+At the end of a successful full run it also writes a small run-level summary in
+the run root directory.
 
 By default, `run_all.sh` versions each full run under a timestamped directory:
 
@@ -205,6 +211,12 @@ Useful overrides:
 VERSION_RUNS=false ./run_all.sh
 RUN_ID=baseline_a ./run_all.sh
 RESULTS_ROOT_DIR=/tmp/my_results ./run_all.sh
+```
+
+You can also run a lightweight preflight check before a longer experiment:
+
+```sh
+Rscript validate_repo.R
 ```
 
 The scripts also work when sourced interactively from VS Code, RStudio Pro, or
@@ -249,6 +261,11 @@ on the script, this includes:
 - a log file for progress and debugging
 - `run_manifest.csv` and `run_manifest.rds`
 
+The full-run wrapper also writes:
+
+- `run_summary.csv` and `run_summary.rds`
+- `run_summary_scripts.csv` and `run_summary_scripts.rds`
+
 The run manifest is intended to make later comparisons easier. It includes:
 
 - `seed`
@@ -264,6 +281,8 @@ The run manifest is intended to make later comparisons easier. It includes:
 
 If a script fails after logging has started, it still writes a manifest with
 `status = failed` and closes the log cleanly.
+The run summary gives you a compact view over the script statuses, the overall
+run status, and the top-ranked model from the comparison step.
 
 ## Required R Packages
 
@@ -318,11 +337,13 @@ Expected repository layout:
 .
 ├── config.R
 ├── preprocess_data.R
+├── validate_repo.R
 ├── experiment_utils.R
 ├── mlr3_ranger_tuning.R
 ├── mlr3_xgb_tuning.R
 ├── zinb_stepwise_cv.R
 ├── compare_best_models.R
+├── write_run_summary.R
 └── testfile_zinb_nonlinear_eintritte.csv
 ```
 
