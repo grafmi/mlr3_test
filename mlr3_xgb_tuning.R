@@ -7,6 +7,7 @@ suppressPackageStartupMessages({
   library(mlr3tuning)
   library(paradox)
   library(bbotk)
+  library(future)
 })
 
 # =========================
@@ -16,12 +17,14 @@ suppressPackageStartupMessages({
 # You can still replace this with your own loader if needed.
 
 TARGET <- "n_eintritte"
+FEATURE_COLS <- c("prcrank", "potenzielle_kunden", "unfalldeckung")
 ID_COLS <- character(0)
 OUTPUT_DIR <- "outputs_xgb"
 N_FOLDS <- 10
 SEED <- 123
-TUNE_EVALS <- 80
+TUNE_EVALS <- 5
 STRATA_BINS <- 10
+N_WORKERS <- 16
 
 get_script_dir <- function() {
   cmd_args <- commandArgs(trailingOnly = FALSE)
@@ -42,12 +45,10 @@ DATA_PATH <- file.path(SCRIPT_DIR, "testfile_zinb_nonlinear_eintritte.csv")
 # Helpers
 # =========================
 load_default_df <- function() {
-  if (exists("df", inherits = TRUE)) return(invisible(TRUE))
   if (!file.exists(DATA_PATH)) {
     stop(sprintf("Default data file not found: %s", DATA_PATH))
   }
-  df <<- fread(DATA_PATH)
-  invisible(TRUE)
+  fread(DATA_PATH)
 }
 
 make_strata <- function(y, n_bins = 10) {
@@ -92,35 +93,69 @@ reg_metrics <- function(truth, response) {
   )
 }
 
-fold_metrics_from_prediction <- function(pred) {
-  dt <- data.table(
-    row_id = pred$row_ids,
-    truth = pred$truth,
-    response = pred$response
-  )
-  dt[, fold := pred$fold]
-  dt[, reg_metrics(truth, response), by = fold][order(fold)]
+predictions_from_resample <- function(rr) {
+  pred_list <- rr$predictions()
+  rbindlist(lapply(seq_along(pred_list), function(fold) {
+    pred <- pred_list[[fold]]
+    data.table(
+      row_id = pred$row_ids,
+      fold = fold,
+      truth = pred$truth,
+      response = pred$response,
+      error = pred$response - pred$truth,
+      abs_error = abs(pred$response - pred$truth)
+    )
+  }))
+}
+
+fold_metrics_from_predictions <- function(predictions) {
+  predictions[, reg_metrics(truth, response), by = fold][order(fold)]
 }
 
 aggregate_predictions <- function(pred) {
   reg_metrics(pred$truth, pred$response)
 }
 
+encode_factor_features <- function(dt, target) {
+  feature_cols <- setdiff(names(dt), target)
+  factor_cols <- names(which(vapply(dt[, ..feature_cols], is.factor, logical(1))))
+  if (length(factor_cols) == 0) {
+    return(dt)
+  }
+
+  x <- model.matrix(~ . - 1, data = as.data.frame(dt[, ..feature_cols]))
+  data.table(dt[, ..target], as.data.table(x, check.names = TRUE))
+}
+
 # =========================
 # Main
 # =========================
 set.seed(SEED)
-load_default_df()
+future::plan(future::multisession, workers = N_WORKERS)
+
+df <- load_default_df()
 dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 cat("Using data file:", normalizePath(DATA_PATH, mustWork = FALSE), "\n")
+cat("Using future workers:", N_WORKERS, "\n")
 
 if (!is.data.frame(df)) stop("df must be a data.frame or data.table")
 if (!TARGET %in% names(df)) stop(sprintf("TARGET '%s' not found in df", TARGET))
+if (length(FEATURE_COLS) == 0) stop("FEATURE_COLS must contain at least one predictor.")
+missing_features <- setdiff(FEATURE_COLS, names(df))
+if (length(missing_features) > 0) {
+  stop("FEATURE_COLS not found in df: ", paste(missing_features, collapse = ", "))
+}
+if (TARGET %in% FEATURE_COLS) stop("TARGET must not be included in FEATURE_COLS.")
+feature_id_overlap <- intersect(FEATURE_COLS, ID_COLS)
+if (length(feature_id_overlap) > 0) {
+  stop("FEATURE_COLS must not overlap with ID_COLS: ", paste(feature_id_overlap, collapse = ", "))
+}
 
 work_df <- as.data.table(copy(df))
-keep_cols <- setdiff(names(work_df), ID_COLS)
+keep_cols <- setdiff(c(TARGET, FEATURE_COLS), ID_COLS)
 work_df <- work_df[, ..keep_cols]
 work_df <- na.omit(work_df)
+cat("Using features:", paste(FEATURE_COLS, collapse = ", "), "\n")
 
 if (!is.numeric(work_df[[TARGET]])) stop("TARGET must be numeric for regression")
 
@@ -128,6 +163,8 @@ char_cols <- names(which(vapply(work_df, is.character, logical(1))))
 if (length(char_cols) > 0) {
   work_df[, (char_cols) := lapply(.SD, factor), .SDcols = char_cols]
 }
+
+work_df <- encode_factor_features(work_df, TARGET)
 
 backend <- as.data.frame(work_df)
 task <- TaskRegr$new(id = "regr_df", backend = backend, target = TARGET)
@@ -155,7 +192,7 @@ search_space <- ps(
 at <- auto_tuner(
   tuner = tnr("random_search"),
   learner = learner,
-  resampling = rsmp_cv$clone(deep = TRUE),
+  resampling = rsmp("cv", folds = N_FOLDS),
   measure = msr("regr.rmse"),
   search_space = search_space,
   terminator = trm("evals", n_evals = TUNE_EVALS),
@@ -163,24 +200,20 @@ at <- auto_tuner(
   store_models = FALSE
 )
 
-rr <- resample(task, at, rsmp_cv$clone(deep = TRUE), store_models = FALSE)
+rr <- resample(task, at, rsmp_cv$clone(deep = TRUE), store_models = TRUE)
 pred <- rr$prediction()
 
-fold_metrics <- fold_metrics_from_prediction(pred)
+predictions <- predictions_from_resample(rr)
+fold_metrics <- fold_metrics_from_predictions(predictions)
 overall_metrics <- aggregate_predictions(pred)
-predictions <- data.table(
-  row_id = pred$row_ids,
-  fold = pred$fold,
-  truth = pred$truth,
-  response = pred$response,
-  error = pred$response - pred$truth,
-  abs_error = abs(pred$response - pred$truth)
-)
 
 best_params <- as.data.table(rr$learners[[1]]$tuning_result)
-if (nrow(best_params) == 0) {
-  best_params <- as.data.table(rr$learners[[1]]$archive$data[which.min(regr.rmse)])
+if (nrow(best_params) == 0 || ncol(best_params) == 0) {
+  archive_dt <- as.data.table(rr$learners[[1]]$archive$data)
+  best_params <- archive_dt[which.min(archive_dt[["regr.rmse"]])]
 }
+list_cols <- names(which(vapply(best_params, is.list, logical(1))))
+if (length(list_cols) > 0) best_params[, (list_cols) := NULL]
 
 fwrite(fold_metrics, file.path(OUTPUT_DIR, "xgb_fold_metrics.csv"))
 fwrite(overall_metrics, file.path(OUTPUT_DIR, "xgb_overall_metrics.csv"))
@@ -189,3 +222,4 @@ fwrite(best_params, file.path(OUTPUT_DIR, "xgb_best_params.csv"))
 
 cat("Done. Files written to:", normalizePath(OUTPUT_DIR), "\n")
 print(overall_metrics)
+future::plan(future::sequential)
