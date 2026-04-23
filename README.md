@@ -17,8 +17,9 @@ For most users, these are the main steps:
 
 1. Adjust the dataset path and core experiment settings in `config.R`
 2. Optionally run `Rscript validate_repo.R` for a quick smoke check
-3. Run the full pipeline on Linux with `./run_all.sh`
-4. Inspect the versioned output folder under `results/YYYYMMDD_HHMM/`
+3. Optionally run `Rscript run_regression_tests.R` for lightweight regression tests
+4. Run the full pipeline on Linux with `./run_all.sh`
+5. Inspect the versioned output folder under `results/YYYYMMDD_HHMM/`
 
 Typical example:
 
@@ -34,6 +35,7 @@ Then run:
 
 ```sh
 Rscript validate_repo.R
+Rscript run_regression_tests.R
 ./run_all.sh
 ```
 
@@ -52,6 +54,7 @@ The most relevant outputs per script are:
 - `zinb_stepwise_cv.R`: stratified 10-fold CV with forward selection for a ZINB model
 - `compare_best_models.R`: read the best model outputs and create a ranked comparison
 - `validate_repo.R`: quick repository smoke check for packages, config, data, and output paths
+- `run_regression_tests.R`: lightweight regression suite for key failure and reporting paths
 
 ## Validation Design
 
@@ -177,6 +180,7 @@ Typical usage from the repository root:
 ```sh
 Rscript preprocess_data.R
 Rscript validate_repo.R
+Rscript run_regression_tests.R
 Rscript mlr3_ranger_tuning.R
 Rscript mlr3_xgb_tuning.R
 Rscript zinb_stepwise_cv.R
@@ -225,6 +229,12 @@ You can also run a lightweight preflight check before a longer experiment:
 
 ```sh
 Rscript validate_repo.R
+```
+
+And you can run the lightweight regression suite after code changes:
+
+```sh
+Rscript run_regression_tests.R
 ```
 
 The scripts also work when sourced interactively from VS Code, RStudio Pro, or
@@ -292,6 +302,13 @@ If a script fails after logging has started, it still writes a manifest with
 The run summary gives you a compact view over the script statuses, the overall
 run status, and the top-ranked model from the comparison step.
 
+`run_regression_tests.R` currently covers:
+
+- successful `validate_repo.R`
+- failed-run manifest writing for `mlr3_ranger_tuning.R`
+- missing-output diagnostics in `compare_best_models.R`
+- summary-file generation in `write_run_summary.R`
+
 ## Required R Packages
 
 Install these packages before running all scripts:
@@ -346,6 +363,7 @@ Expected repository layout:
 ├── config.R
 ├── preprocess_data.R
 ├── validate_repo.R
+├── run_regression_tests.R
 ├── experiment_utils.R
 ├── mlr3_ranger_tuning.R
 ├── mlr3_xgb_tuning.R
