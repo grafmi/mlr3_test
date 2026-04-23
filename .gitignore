@@ -1,0 +1,7 @@
+outputs_ranger/
+outputs_xgb/
+outputs_zinb/
+outputs_model_comparison/
+.Rhistory
+.RData
+.Rproj.user/
