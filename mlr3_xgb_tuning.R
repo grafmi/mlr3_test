@@ -23,6 +23,7 @@ source_experiment_utils <- function() {
 
 UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
+CONFIG <- load_project_config(REPO_DIR)
 
 require_packages(c(
   "data.table", "mlr3", "mlr3learners", "mlr3tuning", "paradox", "bbotk", "future", "xgboost"
@@ -41,21 +42,27 @@ suppressPackageStartupMessages({
 # =========================
 # User settings
 # =========================
-TARGET <- "n_eintritte"
-FEATURE_COLS <- c("prcrank", "potenzielle_kunden", "unfalldeckung")
-ID_COLS <- character(0)
+TARGET <- get_setting("target", "TARGET", config_value(CONFIG, c("experiment", "target")))
+FEATURE_COLS <- parse_csv_setting(get_setting(
+  "features", "FEATURE_COLS",
+  paste(config_value(CONFIG, c("experiment", "feature_cols")), collapse = ",")
+))
+ID_COLS <- parse_csv_setting(get_setting(
+  "id-cols", "ID_COLS",
+  paste(config_value(CONFIG, c("experiment", "id_cols")), collapse = ",")
+))
 
 DATA_PATH <- get_path_setting(
   "data", "MLR3_DATA_PATH",
-  "testfile_zinb_nonlinear_eintritte.csv",
+  config_value(CONFIG, c("experiment", "data_path")),
   base_dir = REPO_DIR
 )
-OUTPUT_DIR <- get_path_setting("output-dir", "XGB_OUTPUT_DIR", "outputs_xgb", base_dir = REPO_DIR)
-N_FOLDS <- get_int_setting("folds", "N_FOLDS", 10, min_value = 2)
-SEED <- get_int_setting("seed", "SEED", 123)
-TUNE_EVALS <- get_int_setting("tune-evals", "TUNE_EVALS", 10, min_value = 1)
-STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", 10, min_value = 2)
-N_WORKERS <- get_int_setting("workers", "N_WORKERS", 1, min_value = 1)
+OUTPUT_DIR <- get_path_setting("output-dir", "XGB_OUTPUT_DIR", config_value(CONFIG, c("xgboost", "output_dir")), base_dir = REPO_DIR)
+N_FOLDS <- get_int_setting("folds", "N_FOLDS", config_value(CONFIG, c("experiment", "n_folds")), min_value = 2)
+SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
+TUNE_EVALS <- get_int_setting("tune-evals", "TUNE_EVALS", config_value(CONFIG, c("xgboost", "tune_evals")), min_value = 1)
+STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", config_value(CONFIG, c("experiment", "strata_bins")), min_value = 2)
+N_WORKERS <- get_int_setting("workers", "N_WORKERS", config_value(CONFIG, c("experiment", "n_workers")), min_value = 1)
 
 # =========================
 # Main
@@ -95,14 +102,38 @@ learner <- lrn(
 )
 
 search_space <- ps(
-  nrounds = p_int(lower = 50, upper = 800),
-  eta = p_dbl(lower = 0.01, upper = 0.30),
-  max_depth = p_int(lower = 2, upper = 8),
-  min_child_weight = p_dbl(lower = 1, upper = 15),
-  subsample = p_dbl(lower = 0.5, upper = 1.0),
-  colsample_bytree = p_dbl(lower = 0.4, upper = 1.0),
-  lambda = p_dbl(lower = 0, upper = 10),
-  alpha = p_dbl(lower = 0, upper = 10)
+  nrounds = p_int(
+    lower = config_value(CONFIG, c("xgboost", "search_space", "nrounds"))[[1]],
+    upper = config_value(CONFIG, c("xgboost", "search_space", "nrounds"))[[2]]
+  ),
+  eta = p_dbl(
+    lower = config_value(CONFIG, c("xgboost", "search_space", "eta"))[[1]],
+    upper = config_value(CONFIG, c("xgboost", "search_space", "eta"))[[2]]
+  ),
+  max_depth = p_int(
+    lower = config_value(CONFIG, c("xgboost", "search_space", "max_depth"))[[1]],
+    upper = config_value(CONFIG, c("xgboost", "search_space", "max_depth"))[[2]]
+  ),
+  min_child_weight = p_dbl(
+    lower = config_value(CONFIG, c("xgboost", "search_space", "min_child_weight"))[[1]],
+    upper = config_value(CONFIG, c("xgboost", "search_space", "min_child_weight"))[[2]]
+  ),
+  subsample = p_dbl(
+    lower = config_value(CONFIG, c("xgboost", "search_space", "subsample"))[[1]],
+    upper = config_value(CONFIG, c("xgboost", "search_space", "subsample"))[[2]]
+  ),
+  colsample_bytree = p_dbl(
+    lower = config_value(CONFIG, c("xgboost", "search_space", "colsample_bytree"))[[1]],
+    upper = config_value(CONFIG, c("xgboost", "search_space", "colsample_bytree"))[[2]]
+  ),
+  lambda = p_dbl(
+    lower = config_value(CONFIG, c("xgboost", "search_space", "lambda"))[[1]],
+    upper = config_value(CONFIG, c("xgboost", "search_space", "lambda"))[[2]]
+  ),
+  alpha = p_dbl(
+    lower = config_value(CONFIG, c("xgboost", "search_space", "alpha"))[[1]],
+    upper = config_value(CONFIG, c("xgboost", "search_space", "alpha"))[[2]]
+  )
 )
 
 inner_cv <- rsmp("cv", folds = N_FOLDS)

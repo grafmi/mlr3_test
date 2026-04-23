@@ -23,6 +23,7 @@ source_experiment_utils <- function() {
 
 UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
+CONFIG <- load_project_config(REPO_DIR)
 
 require_packages(c("data.table"))
 
@@ -35,22 +36,41 @@ suppressPackageStartupMessages({
 # =========================
 INPUT_PATH <- get_path_setting(
   "input", "INPUT_DATA_PATH",
-  "testfile_zinb_nonlinear_eintritte.csv",
+  config_value(CONFIG, c("experiment", "data_path")),
   base_dir = REPO_DIR
 )
 OUTPUT_DIR <- get_path_setting(
   "output-dir", "PREPROCESS_OUTPUT_DIR",
-  "outputs_preprocessed",
+  config_value(CONFIG, c("preprocess", "output_dir")),
   base_dir = REPO_DIR
 )
-OUTPUT_BASENAME <- get_setting("output-name", "PREPROCESS_OUTPUT_NAME", "preprocessed_dataset")
-OUTPUT_FORMATS <- parse_csv_setting(get_setting("formats", "PREPROCESS_OUTPUT_FORMATS", "csv,rds"))
-ROW_FILTER <- get_setting("filter", "PREPROCESS_FILTER", "")
-KEEP_COLS <- parse_csv_setting(get_setting("keep-cols", "PREPROCESS_KEEP_COLS", ""))
-DROP_COLS <- parse_csv_setting(get_setting("drop-cols", "PREPROCESS_DROP_COLS", ""))
-DROP_MISSING_ROWS <- get_bool_setting("drop-missing-rows", "PREPROCESS_DROP_MISSING_ROWS", FALSE)
-CHARS_TO_FACTORS <- get_bool_setting("chars-to-factors", "PREPROCESS_CHARS_TO_FACTORS", TRUE)
-FACTOR_MIN_COUNT <- get_int_setting("factor-min-count", "PREPROCESS_FACTOR_MIN_COUNT", 5, min_value = 1)
+OUTPUT_BASENAME <- get_setting("output-name", "PREPROCESS_OUTPUT_NAME", config_value(CONFIG, c("preprocess", "output_name")))
+OUTPUT_FORMATS <- parse_csv_setting(get_setting(
+  "formats", "PREPROCESS_OUTPUT_FORMATS",
+  paste(config_value(CONFIG, c("preprocess", "output_formats")), collapse = ",")
+))
+ROW_FILTER <- get_setting("filter", "PREPROCESS_FILTER", config_value(CONFIG, c("preprocess", "filter")))
+KEEP_COLS <- parse_csv_setting(get_setting(
+  "keep-cols", "PREPROCESS_KEEP_COLS",
+  paste(config_value(CONFIG, c("preprocess", "keep_cols")), collapse = ",")
+))
+DROP_COLS <- parse_csv_setting(get_setting(
+  "drop-cols", "PREPROCESS_DROP_COLS",
+  paste(config_value(CONFIG, c("preprocess", "drop_cols")), collapse = ",")
+))
+DROP_MISSING_ROWS <- get_bool_setting(
+  "drop-missing-rows", "PREPROCESS_DROP_MISSING_ROWS",
+  config_value(CONFIG, c("preprocess", "drop_missing_rows"))
+)
+CHARS_TO_FACTORS <- get_bool_setting(
+  "chars-to-factors", "PREPROCESS_CHARS_TO_FACTORS",
+  config_value(CONFIG, c("preprocess", "chars_to_factors"))
+)
+FACTOR_MIN_COUNT <- get_int_setting(
+  "factor-min-count", "PREPROCESS_FACTOR_MIN_COUNT",
+  config_value(CONFIG, c("preprocess", "factor_min_count")),
+  min_value = 1
+)
 
 # =========================
 # Helpers

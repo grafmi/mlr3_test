@@ -7,6 +7,10 @@ The count nature of the target is handled explicitly by the ZINB experiment. The
 `ranger` and XGBoost experiments intentionally treat the target as a regression
 problem for now.
 
+Most experiment defaults now live in `config.R`. The scripts use those values
+as readable defaults and still allow explicit overrides via command-line
+arguments and environment variables.
+
 ## Required R Packages
 
 Install these packages before running all scripts:
@@ -58,6 +62,7 @@ Expected repository layout:
 
 ```text
 .
+├── config.R
 ├── preprocess_data.R
 ├── experiment_utils.R
 ├── mlr3_ranger_tuning.R
@@ -181,6 +186,29 @@ COMPARISON_OUTPUT_DIR=/tmp/outputs_model_comparison \
 
 For reproducibility, the default worker count is `1`. Increase `--workers` for
 faster mlr3 runs and for parallel ZINB candidate evaluation on Linux.
+
+## Configuration
+
+The main place to edit experiment settings is:
+
+```text
+config.R
+```
+
+The file is grouped so that the most important settings appear first:
+
+- `CONFIG$experiment`: data path, target, features, seed, folds, workers
+- `CONFIG$preprocess`: preprocessing defaults and factor handling
+- `CONFIG$ranger`: ranger output directory and tuning defaults
+- `CONFIG$xgboost`: xgboost output directory and tuning defaults
+- `CONFIG$zinb`: ZINB output directory, metric, transformations, and workers
+- `CONFIG$comparison`: model-comparison defaults
+
+The scripts use this precedence order:
+
+1. command-line argument
+2. environment variable
+3. `config.R`
 
 ## Outputs
 

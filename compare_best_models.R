@@ -23,6 +23,7 @@ source_experiment_utils <- function() {
 
 UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
+CONFIG <- load_project_config(REPO_DIR)
 
 require_packages(c("data.table"))
 
@@ -33,15 +34,15 @@ suppressPackageStartupMessages({
 # =========================
 # User settings
 # =========================
-RANGER_DIR <- get_path_setting("ranger-dir", "RANGER_OUTPUT_DIR", "outputs_ranger", base_dir = REPO_DIR)
-XGB_DIR <- get_path_setting("xgb-dir", "XGB_OUTPUT_DIR", "outputs_xgb", base_dir = REPO_DIR)
-ZINB_DIR <- get_path_setting("zinb-dir", "ZINB_OUTPUT_DIR", "outputs_zinb", base_dir = REPO_DIR)
+RANGER_DIR <- get_path_setting("ranger-dir", "RANGER_OUTPUT_DIR", config_value(CONFIG, c("comparison", "ranger_dir")), base_dir = REPO_DIR)
+XGB_DIR <- get_path_setting("xgb-dir", "XGB_OUTPUT_DIR", config_value(CONFIG, c("comparison", "xgb_dir")), base_dir = REPO_DIR)
+ZINB_DIR <- get_path_setting("zinb-dir", "ZINB_OUTPUT_DIR", config_value(CONFIG, c("comparison", "zinb_dir")), base_dir = REPO_DIR)
 OUTPUT_DIR <- get_path_setting(
   "output-dir", "COMPARISON_OUTPUT_DIR",
-  "outputs_model_comparison",
+  config_value(CONFIG, c("comparison", "output_dir")),
   base_dir = REPO_DIR
 )
-METRIC_TO_RANK <- get_setting("metric", "METRIC_TO_RANK", "rmse")
+METRIC_TO_RANK <- get_setting("metric", "METRIC_TO_RANK", config_value(CONFIG, c("comparison", "metric")))
 
 # =========================
 # Helpers

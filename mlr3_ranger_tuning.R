@@ -23,6 +23,7 @@ source_experiment_utils <- function() {
 
 UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
+CONFIG <- load_project_config(REPO_DIR)
 
 require_packages(c(
   "data.table", "mlr3", "mlr3learners", "mlr3tuning", "paradox", "bbotk", "future", "ranger"
@@ -41,21 +42,27 @@ suppressPackageStartupMessages({
 # =========================
 # User settings
 # =========================
-TARGET <- "n_eintritte"
-FEATURE_COLS <- c("prcrank", "potenzielle_kunden", "unfalldeckung")
-ID_COLS <- character(0)
+TARGET <- get_setting("target", "TARGET", config_value(CONFIG, c("experiment", "target")))
+FEATURE_COLS <- parse_csv_setting(get_setting(
+  "features", "FEATURE_COLS",
+  paste(config_value(CONFIG, c("experiment", "feature_cols")), collapse = ",")
+))
+ID_COLS <- parse_csv_setting(get_setting(
+  "id-cols", "ID_COLS",
+  paste(config_value(CONFIG, c("experiment", "id_cols")), collapse = ",")
+))
 
 DATA_PATH <- get_path_setting(
   "data", "MLR3_DATA_PATH",
-  "testfile_zinb_nonlinear_eintritte.csv",
+  config_value(CONFIG, c("experiment", "data_path")),
   base_dir = REPO_DIR
 )
-OUTPUT_DIR <- get_path_setting("output-dir", "RANGER_OUTPUT_DIR", "outputs_ranger", base_dir = REPO_DIR)
-N_FOLDS <- get_int_setting("folds", "N_FOLDS", 10, min_value = 2)
-SEED <- get_int_setting("seed", "SEED", 123)
-TUNE_EVALS <- get_int_setting("tune-evals", "TUNE_EVALS", 10, min_value = 1)
-STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", 10, min_value = 2)
-N_WORKERS <- get_int_setting("workers", "N_WORKERS", 1, min_value = 1)
+OUTPUT_DIR <- get_path_setting("output-dir", "RANGER_OUTPUT_DIR", config_value(CONFIG, c("ranger", "output_dir")), base_dir = REPO_DIR)
+N_FOLDS <- get_int_setting("folds", "N_FOLDS", config_value(CONFIG, c("experiment", "n_folds")), min_value = 2)
+SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
+TUNE_EVALS <- get_int_setting("tune-evals", "TUNE_EVALS", config_value(CONFIG, c("ranger", "tune_evals")), min_value = 1)
+STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", config_value(CONFIG, c("experiment", "strata_bins")), min_value = 2)
+N_WORKERS <- get_int_setting("workers", "N_WORKERS", config_value(CONFIG, c("experiment", "n_workers")), min_value = 1)
 
 # =========================
 # Main
@@ -93,10 +100,19 @@ learner <- lrn(
 )
 
 search_space <- ps(
-  num.trees = p_int(lower = 300, upper = 1500),
+  num.trees = p_int(
+    lower = config_value(CONFIG, c("ranger", "search_space", "num_trees"))[[1]],
+    upper = config_value(CONFIG, c("ranger", "search_space", "num_trees"))[[2]]
+  ),
   mtry = p_int(lower = 1, upper = max(1L, length(task$feature_names))),
-  min.node.size = p_int(lower = 1, upper = 25),
-  sample.fraction = p_dbl(lower = 0.5, upper = 1.0),
+  min.node.size = p_int(
+    lower = config_value(CONFIG, c("ranger", "search_space", "min_node_size"))[[1]],
+    upper = config_value(CONFIG, c("ranger", "search_space", "min_node_size"))[[2]]
+  ),
+  sample.fraction = p_dbl(
+    lower = config_value(CONFIG, c("ranger", "search_space", "sample_fraction"))[[1]],
+    upper = config_value(CONFIG, c("ranger", "search_space", "sample_fraction"))[[2]]
+  ),
   replace = p_lgl()
 )
 

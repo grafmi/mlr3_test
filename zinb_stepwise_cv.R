@@ -23,6 +23,7 @@ source_experiment_utils <- function() {
 
 UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
+CONFIG <- load_project_config(REPO_DIR)
 
 require_packages(c("data.table", "pscl"))
 
@@ -35,26 +36,39 @@ suppressPackageStartupMessages({
 # =========================
 # User settings
 # =========================
-TARGET <- "n_eintritte"
-FEATURE_COLS <- c("prcrank", "potenzielle_kunden", "unfalldeckung")
-ID_COLS <- character(0)
+TARGET <- get_setting("target", "TARGET", config_value(CONFIG, c("experiment", "target")))
+FEATURE_COLS <- parse_csv_setting(get_setting(
+  "features", "FEATURE_COLS",
+  paste(config_value(CONFIG, c("experiment", "feature_cols")), collapse = ",")
+))
+ID_COLS <- parse_csv_setting(get_setting(
+  "id-cols", "ID_COLS",
+  paste(config_value(CONFIG, c("experiment", "id_cols")), collapse = ",")
+))
 
 DATA_PATH <- get_path_setting(
   "data", "MLR3_DATA_PATH",
-  "testfile_zinb_nonlinear_eintritte.csv",
+  config_value(CONFIG, c("experiment", "data_path")),
   base_dir = REPO_DIR
 )
-OUTPUT_DIR <- get_path_setting("output-dir", "ZINB_OUTPUT_DIR", "outputs_zinb", base_dir = REPO_DIR)
-N_FOLDS <- get_int_setting("folds", "N_FOLDS", 10, min_value = 2)
-SEED <- get_int_setting("seed", "SEED", 123)
-STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", 10, min_value = 2)
-MAX_VARS <- get_numeric_setting("max-vars", "ZINB_MAX_VARS", Inf, min_value = 1)
-MIN_IMPROVEMENT <- get_numeric_setting("min-improvement", "ZINB_MIN_IMPROVEMENT", 0, min_value = 0)
-METRIC_TO_OPTIMIZE <- get_setting("metric", "METRIC_TO_OPTIMIZE", "rmse")
-N_WORKERS <- get_int_setting("workers", "ZINB_WORKERS", Sys.getenv("N_WORKERS", unset = "16"), min_value = 1)
-TRANSFORMATIONS_NUMERIC <- c("raw", "sqrt", "log1p", "ns2", "poly2")
-TRANSFORMATIONS_FACTOR <- c("raw")
-USE_SAME_FORMULA_FOR_ZERO_PART <- isTRUE(tolower(get_setting("same-zero-formula", "ZINB_SAME_ZERO_FORMULA", "false")) %in% c("1", "true", "yes"))
+OUTPUT_DIR <- get_path_setting("output-dir", "ZINB_OUTPUT_DIR", config_value(CONFIG, c("zinb", "output_dir")), base_dir = REPO_DIR)
+N_FOLDS <- get_int_setting("folds", "N_FOLDS", config_value(CONFIG, c("experiment", "n_folds")), min_value = 2)
+SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
+STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", config_value(CONFIG, c("experiment", "strata_bins")), min_value = 2)
+MAX_VARS <- get_numeric_setting("max-vars", "ZINB_MAX_VARS", config_value(CONFIG, c("zinb", "max_vars")), min_value = 1)
+MIN_IMPROVEMENT <- get_numeric_setting("min-improvement", "ZINB_MIN_IMPROVEMENT", config_value(CONFIG, c("zinb", "min_improvement")), min_value = 0)
+METRIC_TO_OPTIMIZE <- get_setting("metric", "METRIC_TO_OPTIMIZE", config_value(CONFIG, c("zinb", "metric")))
+N_WORKERS <- get_int_setting(
+  "workers", "ZINB_WORKERS",
+  get_setting("workers", "N_WORKERS", config_value(CONFIG, c("zinb", "workers"))),
+  min_value = 1
+)
+TRANSFORMATIONS_NUMERIC <- config_value(CONFIG, c("zinb", "transformations_numeric"))
+TRANSFORMATIONS_FACTOR <- config_value(CONFIG, c("zinb", "transformations_factor"))
+USE_SAME_FORMULA_FOR_ZERO_PART <- get_bool_setting(
+  "same-zero-formula", "ZINB_SAME_ZERO_FORMULA",
+  config_value(CONFIG, c("zinb", "same_zero_formula"))
+)
 
 ALLOWED_METRICS <- c("rmse", "mae", "max_error", "mse", "r2")
 if (!METRIC_TO_OPTIMIZE %in% ALLOWED_METRICS) {
