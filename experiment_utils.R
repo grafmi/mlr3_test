@@ -73,11 +73,110 @@ get_path_setting <- function(arg_name, env_name, default, base_dir) {
   resolve_path(get_setting(arg_name, env_name, default), base_dir)
 }
 
-load_csv_checked <- function(data_path) {
+parse_csv_setting <- function(value) {
+  if (is.null(value) || !nzchar(trimws(value))) return(character(0))
+  out <- trimws(unlist(strsplit(value, ",", fixed = TRUE), use.names = FALSE))
+  unique(out[nzchar(out)])
+}
+
+get_bool_setting <- function(arg_name, env_name, default = FALSE) {
+  value <- tolower(trimws(as.character(get_setting(arg_name, env_name, default))))
+  if (value %in% c("1", "true", "yes", "y")) return(TRUE)
+  if (value %in% c("0", "false", "no", "n")) return(FALSE)
+  stop(sprintf("Setting '%s' must be TRUE/FALSE.", arg_name), call. = FALSE)
+}
+
+file_extension <- function(path) {
+  tolower(tools::file_ext(path))
+}
+
+guess_delimiter <- function(path) {
+  ext <- file_extension(path)
+  if (ext %in% c("tsv", "tab", "txt")) return("\t")
+  ","
+}
+
+extract_tabular_object <- function(object, source_path) {
+  if (is.data.frame(object) || data.table::is.data.table(object)) {
+    return(data.table::as.data.table(data.table::copy(object)))
+  }
+
+  if (is.matrix(object)) {
+    return(data.table::as.data.table(object))
+  }
+
+  if (is.list(object) && !is.data.frame(object)) {
+    tabular <- Filter(function(x) is.data.frame(x) || data.table::is.data.table(x) || is.matrix(x), object)
+    if (length(tabular) == 1) {
+      return(extract_tabular_object(tabular[[1]], source_path))
+    }
+  }
+
+  stop(
+    "Could not extract a tabular dataset from: ",
+    normalizePath(source_path, mustWork = FALSE),
+    call. = FALSE
+  )
+}
+
+load_tabular_data_checked <- function(data_path) {
   if (!file.exists(data_path)) {
     stop("Data file not found: ", normalizePath(data_path, mustWork = FALSE), call. = FALSE)
   }
-  data.table::fread(data_path, header = TRUE)
+
+  ext <- file_extension(data_path)
+
+  if (ext %in% c("csv", "tsv", "txt", "tab")) {
+    return(data.table::fread(data_path, header = TRUE, sep = guess_delimiter(data_path)))
+  }
+
+  if (ext == "rds") {
+    return(extract_tabular_object(readRDS(data_path), data_path))
+  }
+
+  if (ext %in% c("rda", "rdata")) {
+    env <- new.env(parent = emptyenv())
+    loaded_names <- load(data_path, envir = env)
+    if (length(loaded_names) == 0) {
+      stop("No objects found in: ", normalizePath(data_path, mustWork = FALSE), call. = FALSE)
+    }
+
+    objects <- mget(loaded_names, envir = env, inherits = FALSE)
+    tabular_names <- names(Filter(function(x) {
+      is.data.frame(x) || data.table::is.data.table(x) || is.matrix(x)
+    }, objects))
+
+    if (length(tabular_names) == 0) {
+      stop(
+        "No data.frame-like object found in: ",
+        normalizePath(data_path, mustWork = FALSE),
+        call. = FALSE
+      )
+    }
+    if (length(tabular_names) > 1) {
+      stop(
+        "Found multiple data.frame-like objects in ",
+        normalizePath(data_path, mustWork = FALSE),
+        ": ",
+        paste(tabular_names, collapse = ", "),
+        ". Keep only one tabular object in the file.",
+        call. = FALSE
+      )
+    }
+
+    return(extract_tabular_object(objects[[tabular_names]], data_path))
+  }
+
+  stop(
+    "Unsupported data file extension '.", ext, "' for ",
+    normalizePath(data_path, mustWork = FALSE),
+    ". Supported extensions: csv, tsv, txt, tab, rds, rda, RData.",
+    call. = FALSE
+  )
+}
+
+load_csv_checked <- function(data_path) {
+  load_tabular_data_checked(data_path)
 }
 
 validate_columns <- function(df, target, feature_cols, id_cols = character(0)) {
@@ -286,6 +385,104 @@ safe_write_csv <- function(dt, path) {
   data.table::fwrite(dt, path)
   rds_path <- if (grepl("\\.csv$", path)) sub("\\.csv$", ".rds", path) else paste0(path, ".rds")
   saveRDS(dt, rds_path)
+}
+
+write_tabular_dataset <- function(dt, path) {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  ext <- file_extension(path)
+
+  if (ext == "csv") {
+    data.table::fwrite(dt, path)
+    return(invisible(path))
+  }
+  if (ext %in% c("tsv", "txt", "tab")) {
+    data.table::fwrite(dt, path, sep = "\t")
+    return(invisible(path))
+  }
+  if (ext == "rds") {
+    saveRDS(dt, path)
+    return(invisible(path))
+  }
+  if (ext %in% c("rda", "rdata")) {
+    dataset <- as.data.frame(dt)
+    save(dataset, file = path)
+    return(invisible(path))
+  }
+
+  stop(
+    "Unsupported output extension '.", ext, "' for ",
+    normalizePath(path, mustWork = FALSE),
+    ". Supported extensions: csv, tsv, txt, tab, rds, rda, RData.",
+    call. = FALSE
+  )
+}
+
+write_dataset_formats <- function(dt, output_dir, output_basename, formats) {
+  if (length(formats) == 0) {
+    stop("At least one output format must be provided.", call. = FALSE)
+  }
+
+  formats <- unique(tolower(formats))
+  paths <- file.path(output_dir, paste0(output_basename, ".", formats))
+  for (path in paths) {
+    write_tabular_dataset(dt, path)
+  }
+  data.table::data.table(format = formats, path = paths)
+}
+
+build_dataset_metadata <- function(original_dt, processed_dt, source_path,
+                                   filter_expression = "", keep_cols = character(0),
+                                   drop_cols = character(0), drop_missing_rows = FALSE,
+                                   output_files = NULL) {
+  source_path <- normalizePath(source_path, mustWork = FALSE)
+
+  summary_dt <- data.table::data.table(
+    source_path = source_path,
+    created_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
+    rows_input = nrow(original_dt),
+    cols_input = ncol(original_dt),
+    rows_output = nrow(processed_dt),
+    cols_output = ncol(processed_dt),
+    rows_removed = nrow(original_dt) - nrow(processed_dt),
+    filter_expression = if (nzchar(filter_expression)) filter_expression else NA_character_,
+    keep_cols = if (length(keep_cols) > 0) paste(keep_cols, collapse = ", ") else NA_character_,
+    drop_cols = if (length(drop_cols) > 0) paste(drop_cols, collapse = ", ") else NA_character_,
+    drop_missing_rows = drop_missing_rows
+  )
+
+  column_metadata <- data.table::rbindlist(lapply(names(processed_dt), function(col) {
+    values <- processed_dt[[col]]
+    non_missing <- values[!is.na(values)]
+    example_value <- if (length(non_missing) > 0) as.character(non_missing[[1]]) else NA_character_
+    data.table::data.table(
+      column = col,
+      class = paste(class(values), collapse = ", "),
+      typeof = typeof(values),
+      n_missing = sum(is.na(values)),
+      pct_missing = mean(is.na(values)),
+      n_unique = data.table::uniqueN(values, na.rm = FALSE),
+      example_value = example_value
+    )
+  }), fill = TRUE)
+
+  output_files_dt <- if (is.null(output_files)) {
+    data.table::data.table(file_role = character(0), path = character(0))
+  } else {
+    data.table::as.data.table(data.table::copy(output_files))
+  }
+
+  list(
+    summary = summary_dt,
+    columns = column_metadata,
+    output_files = output_files_dt
+  )
+}
+
+write_metadata_bundle <- function(metadata, output_dir, prefix = "dataset_metadata") {
+  safe_write_csv(metadata$summary, file.path(output_dir, paste0(prefix, "_summary.csv")))
+  safe_write_csv(metadata$columns, file.path(output_dir, paste0(prefix, "_columns.csv")))
+  safe_write_csv(metadata$output_files, file.path(output_dir, paste0(prefix, "_files.csv")))
+  saveRDS(metadata, file.path(output_dir, paste0(prefix, ".rds")))
 }
 
 timestamp <- function() {

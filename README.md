@@ -58,6 +58,7 @@ Expected repository layout:
 
 ```text
 .
+├── preprocess_data.R
 ├── experiment_utils.R
 ├── mlr3_ranger_tuning.R
 ├── mlr3_xgb_tuning.R
@@ -67,6 +68,14 @@ Expected repository layout:
 ```
 
 ## Scripts
+
+```text
+preprocess_data.R
+```
+
+Loads a tabular dataset from `csv`, `tsv`, `txt`, `rds`, `rda`, or `RData`,
+applies simple preprocessing steps such as row filters and column selection,
+then writes the processed dataset plus metadata files.
 
 ```text
 mlr3_ranger_tuning.R
@@ -103,6 +112,7 @@ comparison table.
 Typical usage from the repository root:
 
 ```sh
+Rscript preprocess_data.R
 Rscript mlr3_ranger_tuning.R
 Rscript mlr3_xgb_tuning.R
 Rscript zinb_stepwise_cv.R
@@ -125,6 +135,8 @@ current working directory.
 Common command-line overrides:
 
 ```sh
+Rscript preprocess_data.R --input=/path/to/data.rds --formats=csv,rds --filter="n_eintritte >= 0"
+Rscript preprocess_data.R --keep-cols=n_eintritte,prcrank --drop-missing-rows=true
 Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --tune-evals=20 --workers=4
 Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
 Rscript zinb_stepwise_cv.R --metric=rmse --max-vars=3 --workers=4
@@ -132,10 +144,26 @@ Rscript compare_best_models.R --metric=rmse
 ```
 
 The same settings can be controlled with environment variables, for example
-`MLR3_DATA_PATH`, `N_FOLDS`, `TUNE_EVALS`, `N_WORKERS`,
-`RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
-`COMPARISON_OUTPUT_DIR`. ZINB also supports `ZINB_WORKERS`, which takes
-precedence over `N_WORKERS` for that script.
+`INPUT_DATA_PATH`, `PREPROCESS_OUTPUT_DIR`, `PREPROCESS_OUTPUT_NAME`,
+`PREPROCESS_OUTPUT_FORMATS`, `PREPROCESS_FILTER`, `PREPROCESS_KEEP_COLS`,
+`PREPROCESS_DROP_COLS`, `PREPROCESS_DROP_MISSING_ROWS`, `MLR3_DATA_PATH`,
+`N_FOLDS`, `TUNE_EVALS`, `N_WORKERS`, `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`,
+`ZINB_OUTPUT_DIR`, and `COMPARISON_OUTPUT_DIR`. ZINB also supports
+`ZINB_WORKERS`, which takes precedence over `N_WORKERS` for that script.
+
+Example preprocessing runs:
+
+```sh
+Rscript preprocess_data.R \
+  --input=testfile_zinb_nonlinear_eintritte.csv \
+  --output-dir=outputs_preprocessed \
+  --formats=csv,rds
+
+Rscript preprocess_data.R \
+  --input=/path/to/data.RData \
+  --filter="n_eintritte >= 1 & prcrank <= 8" \
+  --keep-cols=n_eintritte,prcrank,potenzielle_kunden
+```
 
 Example full run with explicit output directories:
 
@@ -156,6 +184,7 @@ faster mlr3 runs and for parallel ZINB candidate evaluation on Linux.
 Generated files are written to:
 
 ```text
+outputs_preprocessed/
 outputs_ranger/
 outputs_xgb/
 outputs_zinb/
@@ -189,3 +218,24 @@ Every CSV result is also saved as a same-named RDS file, for example
 The log files are written into the same output directory as the CSV files. They
 capture the script settings, progress messages, package output, warnings, and
 errors, which makes long-running jobs easier to monitor and debug.
+
+`preprocess_data.R` writes the processed dataset in the requested formats, for
+example:
+
+```text
+outputs_preprocessed/preprocessed_dataset.csv
+outputs_preprocessed/preprocessed_dataset.rds
+```
+
+It also writes metadata describing the derived dataset:
+
+```text
+outputs_preprocessed/preprocessed_dataset_metadata_summary.csv
+outputs_preprocessed/preprocessed_dataset_metadata_summary.rds
+outputs_preprocessed/preprocessed_dataset_metadata_columns.csv
+outputs_preprocessed/preprocessed_dataset_metadata_columns.rds
+outputs_preprocessed/preprocessed_dataset_metadata_files.csv
+outputs_preprocessed/preprocessed_dataset_metadata_files.rds
+outputs_preprocessed/preprocessed_dataset_metadata.rds
+outputs_preprocessed/preprocess_data.log
+```
