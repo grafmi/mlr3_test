@@ -151,10 +151,16 @@ Each model script writes:
 *_overall_metrics.csv
 *_cv_predictions.csv
 *_best_params.csv or ZINB step-selection tables
+*.log
 ```
 
 `compare_best_models.R` reads those files and writes:
 
 ```text
 outputs_model_comparison/best_models_comparison.csv
+outputs_model_comparison/compare_best_models.log
 ```
+
+The log files are written into the same output directory as the CSV files. They
+capture the script settings, progress messages, package output, warnings, and
+errors, which makes long-running jobs easier to monitor and debug.

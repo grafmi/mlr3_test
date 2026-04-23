@@ -95,7 +95,14 @@ rank_values <- function(values, metric) {
 # =========================
 # Main
 # =========================
+.script_ok <- FALSE
+LOG_STATE <- start_logging(OUTPUT_DIR, "compare_best_models")
+
 dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+log_info("Using metric to rank: ", METRIC_TO_RANK)
+log_info("Using ranger directory: ", normalizePath(RANGER_DIR, mustWork = FALSE))
+log_info("Using xgb directory: ", normalizePath(XGB_DIR, mustWork = FALSE))
+log_info("Using zinb directory: ", normalizePath(ZINB_DIR, mustWork = FALSE))
 
 ranger_metrics <- read_if_exists(file.path(RANGER_DIR, "ranger_overall_metrics.csv"))
 ranger_params <- read_if_exists(file.path(RANGER_DIR, "ranger_best_params.csv"))
@@ -148,5 +155,7 @@ setcolorder(comparison, c("rank", "model", "rmse", "mae", "max_error", "sae", "m
 out_path <- file.path(OUTPUT_DIR, "best_models_comparison.csv")
 safe_write_csv(comparison, out_path)
 
-cat("Done. Comparison written to:", normalizePath(out_path, mustWork = FALSE), "\n")
+log_info("Done. Comparison written to: ", normalizePath(out_path, mustWork = FALSE))
 print(comparison)
+.script_ok <- TRUE
+stop_logging(LOG_STATE, if (.script_ok) "completed" else "failed")

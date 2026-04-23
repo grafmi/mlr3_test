@@ -274,15 +274,18 @@ evaluate_candidates_parallel <- function(candidate_specs, work_dt, target, fold_
 # =========================
 # Main
 # =========================
+.script_ok <- FALSE
+LOG_STATE <- start_logging(OUTPUT_DIR, "zinb_stepwise_cv")
+
 set.seed(SEED)
 df <- load_csv_checked(DATA_PATH)
 work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS, require_count_target = TRUE)
 dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
-cat("Using data file:", normalizePath(DATA_PATH, mustWork = FALSE), "\n")
-cat("Using output directory:", normalizePath(OUTPUT_DIR, mustWork = FALSE), "\n")
-cat("Using features:", paste(FEATURE_COLS, collapse = ", "), "\n")
-cat("Using folds / metric / workers:", N_FOLDS, "/", METRIC_TO_OPTIMIZE, "/", N_WORKERS, "\n")
+log_info("Using data file: ", normalizePath(DATA_PATH, mustWork = FALSE))
+log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+log_info("Using features: ", paste(FEATURE_COLS, collapse = ", "))
+log_info("Using folds / metric / workers: ", N_FOLDS, " / ", METRIC_TO_OPTIMIZE, " / ", N_WORKERS)
 
 predictor_pool <- FEATURE_COLS
 fold_ids <- make_stratified_fold_ids(work_dt[[TARGET]], nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
@@ -356,7 +359,7 @@ for (step_i in seq_len(max_steps)) {
   }
 
   if (length(candidates) == 0) {
-    message(sprintf("No valid candidate found at step %s. Stopping.", step_i))
+    log_info("No valid candidate found at step ", step_i, ". Stopping.")
     break
   }
 
@@ -368,10 +371,7 @@ for (step_i in seq_len(max_steps)) {
   best_row <- step_table[1]
 
   if (!is_improvement(best_row$optimization_score, current_best_score, METRIC_TO_OPTIMIZE, MIN_IMPROVEMENT)) {
-    message(sprintf(
-      "Step %s did not improve %s beyond %.5f. Stopping.",
-      step_i, METRIC_TO_OPTIMIZE, MIN_IMPROVEMENT
-    ))
+    log_info("Step ", step_i, " did not improve ", METRIC_TO_OPTIMIZE, " beyond ", sprintf("%.5f", MIN_IMPROVEMENT), ". Stopping.")
     search_log[[step_i]] <- copy(step_table)
     break
   }
@@ -397,10 +397,10 @@ for (step_i in seq_len(max_steps)) {
   search_log[[step_i]] <- copy(step_table)
   best_step_results[[step_i]] <- list(summary = step_summary, eval = best_eval)
 
-  message(sprintf(
-    "Step %s selected: %s [%s] | %s = %.5f",
-    step_i, best_row$variable, best_row$transformation, METRIC_TO_OPTIMIZE, best_row$optimization_score
-  ))
+  log_info(
+    "Step ", step_i, " selected: ", best_row$variable, " [", best_row$transformation,
+    "] | ", METRIC_TO_OPTIMIZE, " = ", sprintf("%.5f", best_row$optimization_score)
+  )
 }
 
 if (length(search_log) > 0) {
@@ -414,9 +414,11 @@ if (length(best_step_results) == 0) {
   safe_write_csv(baseline_eval$fold_metrics, file.path(OUTPUT_DIR, "zinb_best_global_fold_metrics.csv"))
   safe_write_csv(baseline_eval$overall, file.path(OUTPUT_DIR, "zinb_best_global_overall_metrics.csv"))
   safe_write_csv(baseline_eval$predictions, file.path(OUTPUT_DIR, "zinb_best_global_cv_predictions.csv"))
-  cat("Done. Files written to:", normalizePath(OUTPUT_DIR, mustWork = FALSE), "\n")
-  cat("No ZINB candidate improved on the intercept-only baseline.\n")
+  log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+  log_info("No ZINB candidate improved on the intercept-only baseline.")
   print(baseline_eval$overall)
+  .script_ok <- TRUE
+  stop_logging(LOG_STATE, if (.script_ok) "completed" else "failed")
 } else {
   best_by_step <- rbindlist(lapply(best_step_results, function(x) x$summary), fill = TRUE)
   best_global_idx <- if (METRIC_TO_OPTIMIZE == "r2") {
@@ -431,8 +433,10 @@ if (length(best_step_results) == 0) {
   safe_write_csv(best_global$eval$overall, file.path(OUTPUT_DIR, "zinb_best_global_overall_metrics.csv"))
   safe_write_csv(best_global$eval$predictions, file.path(OUTPUT_DIR, "zinb_best_global_cv_predictions.csv"))
 
-  cat("Done. Files written to:", normalizePath(OUTPUT_DIR, mustWork = FALSE), "\n")
-  cat("Best global formula:\n")
+  log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+  log_info("Best global formula:")
   print(best_global$eval$formula)
   print(best_global$eval$overall)
+  .script_ok <- TRUE
+  stop_logging(LOG_STATE, if (.script_ok) "completed" else "failed")
 }

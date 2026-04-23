@@ -285,3 +285,37 @@ safe_write_csv <- function(dt, path) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   data.table::fwrite(dt, path)
 }
+
+timestamp <- function() {
+  format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")
+}
+
+log_info <- function(...) {
+  cat(sprintf("[%s] ", timestamp()), ..., "\n", sep = "")
+}
+
+start_logging <- function(output_dir, script_name) {
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  log_path <- file.path(output_dir, sprintf("%s.log", script_name))
+  log_con <- file(log_path, open = "wt")
+
+  sink(log_con, split = TRUE)
+  sink(log_con, type = "message")
+
+  log_info("Started ", script_name)
+  log_info("Log file: ", normalizePath(log_path, mustWork = FALSE))
+  log_info("R version: ", R.version.string)
+  log_info("Command: ", paste(commandArgs(), collapse = " "))
+
+  list(path = log_path, connection = log_con)
+}
+
+stop_logging <- function(log_state, status = "completed") {
+  if (is.null(log_state)) return(invisible(NULL))
+
+  log_info("Finished with status: ", status)
+  if (sink.number(type = "message") > 0) sink(type = "message")
+  if (sink.number() > 0) sink()
+  close(log_state$connection)
+  invisible(NULL)
+}

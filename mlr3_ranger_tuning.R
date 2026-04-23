@@ -60,6 +60,9 @@ N_WORKERS <- get_int_setting("workers", "N_WORKERS", 1, min_value = 1)
 # =========================
 # Main
 # =========================
+.script_ok <- FALSE
+LOG_STATE <- start_logging(OUTPUT_DIR, "mlr3_ranger_tuning")
+
 set.seed(SEED)
 if (N_WORKERS > 1) {
   future::plan(future::multisession, workers = N_WORKERS)
@@ -72,10 +75,10 @@ df <- load_csv_checked(DATA_PATH)
 work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS)
 dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
-cat("Using data file:", normalizePath(DATA_PATH, mustWork = FALSE), "\n")
-cat("Using output directory:", normalizePath(OUTPUT_DIR, mustWork = FALSE), "\n")
-cat("Using features:", paste(FEATURE_COLS, collapse = ", "), "\n")
-cat("Using folds / tuning evals / workers:", N_FOLDS, "/", TUNE_EVALS, "/", N_WORKERS, "\n")
+log_info("Using data file: ", normalizePath(DATA_PATH, mustWork = FALSE))
+log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+log_info("Using features: ", paste(FEATURE_COLS, collapse = ", "))
+log_info("Using folds / tuning evals / workers: ", N_FOLDS, " / ", TUNE_EVALS, " / ", N_WORKERS)
 
 backend <- add_regression_stratum(as.data.frame(work_dt), target = TARGET, n_bins = STRATA_BINS)
 task <- make_regr_task("ranger_regression", backend = backend, target = TARGET)
@@ -121,5 +124,7 @@ safe_write_csv(overall_metrics, file.path(OUTPUT_DIR, "ranger_overall_metrics.cs
 safe_write_csv(predictions, file.path(OUTPUT_DIR, "ranger_cv_predictions.csv"))
 safe_write_csv(best_params, file.path(OUTPUT_DIR, "ranger_best_params.csv"))
 
-cat("Done. Files written to:", normalizePath(OUTPUT_DIR, mustWork = FALSE), "\n")
+log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
 print(overall_metrics)
+.script_ok <- TRUE
+stop_logging(LOG_STATE, if (.script_ok) "completed" else "failed")
