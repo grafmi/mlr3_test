@@ -7,6 +7,27 @@ The count nature of the target is handled explicitly by the ZINB experiment. The
 `ranger` and XGBoost experiments intentionally treat the target as a regression
 problem for now.
 
+## Required R Packages
+
+Install these packages before running all scripts:
+
+```r
+install.packages(c(
+  "data.table",
+  "mlr3",
+  "mlr3learners",
+  "mlr3tuning",
+  "paradox",
+  "bbotk",
+  "future",
+  "ranger",
+  "xgboost",
+  "pscl"
+))
+```
+
+`splines` is used by the ZINB transformations and ships with base R.
+
 ## Data
 
 Default input:
@@ -30,8 +51,20 @@ unfalldeckung
 FEATURE_COLS <- c("prcrank", "potenzielle_kunden", "unfalldeckung")
 ```
 
-For real data with more columns, edit `FEATURE_COLS` in the mlr3 scripts to
-control which predictors are used.
+For real data with more columns, edit `FEATURE_COLS` in the mlr3 and ZINB
+scripts to control which predictors are used.
+
+Expected repository layout:
+
+```text
+.
+├── experiment_utils.R
+├── mlr3_ranger_tuning.R
+├── mlr3_xgb_tuning.R
+├── zinb_stepwise_cv.R
+├── compare_best_models.R
+└── testfile_zinb_nonlinear_eintritte.csv
+```
 
 ## Scripts
 
@@ -54,7 +87,9 @@ zinb_stepwise_cv.R
 ```
 
 Runs stepwise feature and transformation selection for a zero-inflated negative
-binomial model via `pscl::zeroinfl`.
+binomial model via `pscl::zeroinfl`. The count part is selected stepwise from
+`FEATURE_COLS`; the zero-inflation part is currently fixed to an intercept
+(`| 1`).
 
 ```text
 compare_best_models.R
@@ -63,17 +98,37 @@ compare_best_models.R
 Reads the output CSV files from the model scripts and writes a simple ranked
 comparison table.
 
-## Parallelism
+## Running
 
-The mlr3 scripts use `future::multisession`. Configure the worker count in each
-script:
+Typical usage from the repository root:
 
-```r
-N_WORKERS <- 16
+```sh
+Rscript mlr3_ranger_tuning.R
+Rscript mlr3_xgb_tuning.R
+Rscript zinb_stepwise_cv.R
+Rscript compare_best_models.R
 ```
 
-Reduce this value when running multiple scripts at the same time, for example
-when starting Ranger and XGBoost in parallel.
+The scripts also work when sourced interactively from VS Code, RStudio Pro, or
+Positron, as long as `experiment_utils.R` is either next to the script or in the
+current working directory.
+
+Common command-line overrides:
+
+```sh
+Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --tune-evals=20 --workers=4
+Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
+Rscript zinb_stepwise_cv.R --metric=rmse --max-vars=3
+Rscript compare_best_models.R --metric=rmse
+```
+
+The same settings can be controlled with environment variables, for example
+`MLR3_DATA_PATH`, `N_FOLDS`, `TUNE_EVALS`, `N_WORKERS`,
+`RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
+`COMPARISON_OUTPUT_DIR`.
+
+For reproducibility, the default worker count is `1`. Increase `--workers` for
+faster mlr3 runs when exact repeatability is less important.
 
 ## Outputs
 
@@ -88,11 +143,17 @@ outputs_model_comparison/
 
 These directories are ignored by git.
 
-## Typical Usage
+Each model script writes:
 
-```sh
-Rscript mlr3_ranger_tuning.R
-Rscript mlr3_xgb_tuning.R
-Rscript zinb_stepwise_cv.R
-Rscript compare_best_models.R
+```text
+*_fold_metrics.csv
+*_overall_metrics.csv
+*_cv_predictions.csv
+*_best_params.csv or ZINB step-selection tables
+```
+
+`compare_best_models.R` reads those files and writes:
+
+```text
+outputs_model_comparison/best_models_comparison.csv
 ```

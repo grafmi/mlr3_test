@@ -1,5 +1,31 @@
 #!/usr/bin/env Rscript
 
+source_experiment_utils <- function() {
+  cmd_args <- commandArgs(trailingOnly = FALSE)
+  file_arg <- grep("^--file=", cmd_args, value = TRUE)
+  script_dir <- if (length(file_arg) > 0) {
+    dirname(normalizePath(sub("^--file=", "", file_arg[1]), mustWork = TRUE))
+  } else if (length(Filter(Negate(is.null), lapply(sys.frames(), function(x) x$ofile))) > 0) {
+    ofiles <- Filter(Negate(is.null), lapply(sys.frames(), function(x) x$ofile))
+    dirname(normalizePath(ofiles[[length(ofiles)]], mustWork = TRUE))
+  } else {
+    getwd()
+  }
+  candidates <- unique(c(file.path(script_dir, "experiment_utils.R"), file.path(getwd(), "experiment_utils.R")))
+  for (path in candidates) {
+    if (file.exists(path)) {
+      source(path)
+      return(normalizePath(path, mustWork = TRUE))
+    }
+  }
+  stop("Could not find experiment_utils.R. Run from the repository root or keep it next to this script.")
+}
+
+UTILS_PATH <- source_experiment_utils()
+REPO_DIR <- dirname(UTILS_PATH)
+
+require_packages(c("data.table", "pscl"))
+
 suppressPackageStartupMessages({
   library(data.table)
   library(pscl)
@@ -9,81 +35,34 @@ suppressPackageStartupMessages({
 # =========================
 # User settings
 # =========================
-# Default input file: the synthetic ZINB test dataset saved next to this script.
-# You can still replace this with your own loader if needed.
-
 TARGET <- "n_eintritte"
-CANDIDATE_VARS <- NULL          # NULL = all predictors except TARGET and ID_COLS
+FEATURE_COLS <- c("prcrank", "potenzielle_kunden", "unfalldeckung")
 ID_COLS <- character(0)
-OUTPUT_DIR <- "outputs_zinb"
-N_FOLDS <- 10
-SEED <- 123
-STRATA_BINS <- 10
-MAX_VARS <- Inf                 # e.g. 15 if you want to stop early
-METRIC_TO_OPTIMIZE <- "rmse"   # choose from: rmse, mae, max_error
+
+DATA_PATH <- get_path_setting(
+  "data", "MLR3_DATA_PATH",
+  "testfile_zinb_nonlinear_eintritte.csv",
+  base_dir = REPO_DIR
+)
+OUTPUT_DIR <- get_path_setting("output-dir", "ZINB_OUTPUT_DIR", "outputs_zinb", base_dir = REPO_DIR)
+N_FOLDS <- get_int_setting("folds", "N_FOLDS", 10, min_value = 2)
+SEED <- get_int_setting("seed", "SEED", 123)
+STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", 10, min_value = 2)
+MAX_VARS <- get_numeric_setting("max-vars", "ZINB_MAX_VARS", Inf, min_value = 1)
+MIN_IMPROVEMENT <- get_numeric_setting("min-improvement", "ZINB_MIN_IMPROVEMENT", 0, min_value = 0)
+METRIC_TO_OPTIMIZE <- get_setting("metric", "METRIC_TO_OPTIMIZE", "rmse")
 TRANSFORMATIONS_NUMERIC <- c("raw", "sqrt", "log1p", "ns2", "poly2")
-TRANSFORMATIONS_FACTOR  <- c("raw")
-USE_SAME_FORMULA_FOR_ZERO_PART <- FALSE
+TRANSFORMATIONS_FACTOR <- c("raw")
+USE_SAME_FORMULA_FOR_ZERO_PART <- isTRUE(tolower(get_setting("same-zero-formula", "ZINB_SAME_ZERO_FORMULA", "false")) %in% c("1", "true", "yes"))
 
-get_script_dir <- function() {
-  cmd_args <- commandArgs(trailingOnly = FALSE)
-  file_arg <- grep("^--file=", cmd_args, value = TRUE)
-  if (length(file_arg) > 0) {
-    return(dirname(normalizePath(sub("^--file=", "", file_arg[1]))))
-  }
-  if (!is.null(sys.frames()[[1]]$ofile)) {
-    return(dirname(normalizePath(sys.frames()[[1]]$ofile)))
-  }
-  getwd()
+ALLOWED_METRICS <- c("rmse", "mae", "max_error", "mse", "r2")
+if (!METRIC_TO_OPTIMIZE %in% ALLOWED_METRICS) {
+  stop("METRIC_TO_OPTIMIZE must be one of: ", paste(ALLOWED_METRICS, collapse = ", "), call. = FALSE)
 }
-
-SCRIPT_DIR <- get_script_dir()
-DATA_PATH <- file.path(SCRIPT_DIR, "testfile_zinb_nonlinear_eintritte.csv")
 
 # =========================
-# Helpers
+# ZINB helpers
 # =========================
-load_default_df <- function() {
-  if (!file.exists(DATA_PATH)) {
-    stop(sprintf("Default data file not found: %s", DATA_PATH))
-  }
-  fread(DATA_PATH)
-}
-
-make_strata <- function(y, n_bins = 10) {
-  probs <- seq(0, 1, length.out = n_bins + 1)
-  brks <- unique(quantile(y, probs = probs, na.rm = TRUE, type = 7))
-  if (length(brks) < 3) {
-    return(factor(rep("all", length(y))))
-  }
-  cut(y, breaks = brks, include.lowest = TRUE, ordered_result = TRUE)
-}
-
-make_fold_ids <- function(y, nfolds = 10, seed = 123, n_bins = 10) {
-  set.seed(seed)
-  strata <- make_strata(y, n_bins = n_bins)
-  idx_by_stratum <- split(seq_along(y), strata, drop = TRUE)
-  fold_ids <- integer(length(y))
-  for (ids in idx_by_stratum) {
-    ids <- sample(ids)
-    parts <- split(ids, rep(seq_len(nfolds), length.out = length(ids)))
-    for (k in seq_along(parts)) fold_ids[parts[[k]]] <- k
-  }
-  fold_ids
-}
-
-reg_metrics <- function(truth, response) {
-  err <- response - truth
-  data.table(
-    rmse = sqrt(mean(err^2, na.rm = TRUE)),
-    mae = mean(abs(err), na.rm = TRUE),
-    max_error = max(abs(err), na.rm = TRUE),
-    sae = sum(err, na.rm = TRUE),
-    mse = mean(err^2, na.rm = TRUE),
-    bias = mean(err, na.rm = TRUE)
-  )
-}
-
 is_nonnegative <- function(x) {
   is.numeric(x) && all(x[!is.na(x)] >= 0)
 }
@@ -97,22 +76,28 @@ valid_transformations <- function(x) {
   intersect(TRANSFORMATIONS_FACTOR, "raw")
 }
 
+quote_name <- function(var) {
+  if (make.names(var) == var) return(var)
+  sprintf("`%s`", gsub("`", "\\\\`", var))
+}
+
 term_for <- function(var, transformation) {
+  qvar <- quote_name(var)
   switch(
     transformation,
-    raw = var,
-    sqrt = sprintf("sqrt(%s)", var),
-    log1p = sprintf("log1p(%s)", var),
-    ns2 = sprintf("ns(%s, df = 2)", var),
-    poly2 = sprintf("poly(%s, 2)", var),
-    stop(sprintf("Unknown transformation: %s", transformation))
+    raw = qvar,
+    sqrt = sprintf("sqrt(%s)", qvar),
+    log1p = sprintf("log1p(%s)", qvar),
+    ns2 = sprintf("ns(%s, df = 2)", qvar),
+    poly2 = sprintf("poly(%s, 2)", qvar),
+    stop(sprintf("Unknown transformation: %s", transformation), call. = FALSE)
   )
 }
 
 make_formula <- function(target, terms, same_zero_formula = TRUE) {
   rhs_count <- if (length(terms) == 0) "1" else paste(terms, collapse = " + ")
-  rhs_zero  <- if (same_zero_formula) rhs_count else "1"
-  as.formula(sprintf("%s ~ %s | %s", target, rhs_count, rhs_zero))
+  rhs_zero <- if (same_zero_formula) rhs_count else "1"
+  as.formula(sprintf("%s ~ %s | %s", quote_name(target), rhs_count, rhs_zero))
 }
 
 formula_label <- function(formula_obj) {
@@ -125,9 +110,7 @@ fit_convergence_reason <- function(fit, warnings = character(0)) {
   optim_ok <- !is.null(optim_convergence) && identical(as.integer(optim_convergence), 0L)
   nonconv_warning <- any(grepl("converg", warnings, ignore.case = TRUE))
 
-  if (converged && optim_ok && !nonconv_warning) {
-    return(NA_character_)
-  }
+  if (converged && optim_ok && !nonconv_warning) return(NA_character_)
 
   warning_text <- if (length(warnings) > 0) paste(unique(warnings), collapse = " | ") else "none"
   sprintf(
@@ -142,48 +125,49 @@ fit_predict_one_fold <- function(train_dt, test_dt, formula_obj) {
   fit_warnings <- character(0)
   fit <- tryCatch(
     withCallingHandlers(
-      zeroinfl(formula_obj, data = train_dt, dist = "negbin", EM = TRUE),
+      zeroinfl(
+        formula_obj,
+        data = train_dt,
+        dist = "negbin",
+        EM = TRUE,
+        control = zeroinfl.control(maxit = 100)
+      ),
       warning = function(w) {
         fit_warnings <<- c(fit_warnings, conditionMessage(w))
         invokeRestart("muffleWarning")
       }
     ),
-    error = function(e) {
-      structure(list(message = conditionMessage(e)), class = "zinb_fit_error")
-    }
+    error = function(e) structure(list(message = conditionMessage(e)), class = "zinb_fit_error")
   )
   if (inherits(fit, "zinb_fit_error")) {
     return(list(ok = FALSE, reason = sprintf("fit failed: %s", fit$message)))
   }
 
   convergence_reason <- fit_convergence_reason(fit, warnings = fit_warnings)
-  if (!is.na(convergence_reason)) {
-    return(list(ok = FALSE, reason = convergence_reason))
-  }
+  if (!is.na(convergence_reason)) return(list(ok = FALSE, reason = convergence_reason))
 
   pred <- tryCatch(
     predict(fit, newdata = test_dt, type = "response"),
-    error = function(e) {
-      structure(list(message = conditionMessage(e)), class = "zinb_predict_error")
-    }
+    error = function(e) structure(list(message = conditionMessage(e)), class = "zinb_predict_error")
   )
   if (inherits(pred, "zinb_predict_error")) {
     return(list(ok = FALSE, reason = sprintf("predict failed: %s", pred$message)))
   }
-  if (all(is.na(pred))) {
-    return(list(ok = FALSE, reason = "predict returned only NA values"))
+  if (length(pred) != nrow(test_dt) || all(is.na(pred))) {
+    return(list(ok = FALSE, reason = "predict returned invalid or only NA values"))
   }
 
-  list(ok = TRUE, model = fit, pred = pred)
+  list(ok = TRUE, model = fit, pred = as.numeric(pred))
 }
 
 evaluate_formula_cv <- function(dt, target, fold_ids, formula_obj, metric = "rmse") {
-  fold_results <- vector("list", length = max(fold_ids))
-  pred_list <- vector("list", length = max(fold_ids))
+  n_folds <- max(fold_ids)
+  fold_results <- vector("list", n_folds)
+  pred_list <- vector("list", n_folds)
 
-  for (fold in seq_len(max(fold_ids))) {
+  for (fold in seq_len(n_folds)) {
     train_dt <- dt[fold_ids != fold]
-    test_dt  <- dt[fold_ids == fold]
+    test_dt <- dt[fold_ids == fold]
 
     res <- fit_predict_one_fold(train_dt, test_dt, formula_obj)
     if (!isTRUE(res$ok)) {
@@ -206,7 +190,7 @@ evaluate_formula_cv <- function(dt, target, fold_ids, formula_obj, metric = "rms
 
   fold_metrics <- rbindlist(fold_results, fill = TRUE)
   predictions <- rbindlist(pred_list, fill = TRUE)
-  overall <- reg_metrics(predictions$truth, predictions$response)
+  overall <- aggregate_predictions(predictions)
 
   list(
     ok = TRUE,
@@ -218,41 +202,37 @@ evaluate_formula_cv <- function(dt, target, fold_ids, formula_obj, metric = "rms
   )
 }
 
+is_improvement <- function(candidate_score, current_score, metric, min_improvement) {
+  if (metric == "r2") {
+    return(candidate_score > current_score + min_improvement)
+  }
+  candidate_score < current_score - min_improvement
+}
+
 # =========================
 # Main
 # =========================
 set.seed(SEED)
-df <- load_default_df()
+df <- load_csv_checked(DATA_PATH)
+work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS, require_count_target = TRUE)
 dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+
 cat("Using data file:", normalizePath(DATA_PATH, mustWork = FALSE), "\n")
+cat("Using output directory:", normalizePath(OUTPUT_DIR, mustWork = FALSE), "\n")
+cat("Using features:", paste(FEATURE_COLS, collapse = ", "), "\n")
+cat("Using folds / metric:", N_FOLDS, "/", METRIC_TO_OPTIMIZE, "\n")
 
-if (!is.data.frame(df)) stop("df must be a data.frame or data.table")
-if (!TARGET %in% names(df)) stop(sprintf("TARGET '%s' not found in df", TARGET))
-if (!is.numeric(df[[TARGET]])) stop("TARGET must be numeric count-like for ZINB")
-if (any(df[[TARGET]] < 0, na.rm = TRUE)) stop("TARGET must be non-negative for ZINB")
+predictor_pool <- FEATURE_COLS
+fold_ids <- make_stratified_fold_ids(work_dt[[TARGET]], nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
 
-work_dt <- as.data.table(copy(df))
-keep_cols <- setdiff(names(work_dt), ID_COLS)
-work_dt <- work_dt[, ..keep_cols]
-
-char_cols <- names(which(vapply(work_dt, is.character, logical(1))))
-if (length(char_cols) > 0) {
-  work_dt[, (char_cols) := lapply(.SD, factor), .SDcols = char_cols]
+baseline_formula <- make_formula(TARGET, character(0), same_zero_formula = USE_SAME_FORMULA_FOR_ZERO_PART)
+baseline_eval <- evaluate_formula_cv(work_dt, TARGET, fold_ids, baseline_formula, metric = METRIC_TO_OPTIMIZE)
+if (!isTRUE(baseline_eval$ok)) {
+  stop("The intercept-only ZINB baseline failed: ", baseline_eval$reason, call. = FALSE)
 }
+current_best_score <- baseline_eval$score
+safe_write_csv(baseline_eval$overall, file.path(OUTPUT_DIR, "zinb_baseline_overall_metrics.csv"))
 
-work_dt <- na.omit(work_dt)
-
-predictor_pool <- if (is.null(CANDIDATE_VARS)) {
-  setdiff(names(work_dt), TARGET)
-} else {
-  missing_vars <- setdiff(CANDIDATE_VARS, names(work_dt))
-  if (length(missing_vars) > 0) stop("Variables not found in df: ", paste(missing_vars, collapse = ", "))
-  setdiff(CANDIDATE_VARS, TARGET)
-}
-
-if (length(predictor_pool) == 0) stop("No candidate predictors available.")
-
-fold_ids <- make_fold_ids(work_dt[[TARGET]], nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
 selected <- character(0)
 selected_terms <- character(0)
 selected_transforms <- character(0)
@@ -271,6 +251,18 @@ for (step_i in seq_len(max_steps)) {
 
   for (v in remaining) {
     tfms <- valid_transformations(work_dt[[v]])
+    if (length(tfms) == 0) {
+      failure_log[[length(failure_log) + 1L]] <- data.table(
+        step = step_i,
+        variable = v,
+        transformation = NA_character_,
+        added_term = NA_character_,
+        formula = NA_character_,
+        reason = "no valid transformation for column type or values"
+      )
+      next
+    }
+
     for (tfm in tfms) {
       term <- term_for(v, tfm)
       terms_now <- c(selected_terms, term)
@@ -290,6 +282,7 @@ for (step_i in seq_len(max_steps)) {
           sae = ev$overall$sae,
           mse = ev$overall$mse,
           bias = ev$overall$bias,
+          r2 = ev$overall$r2,
           optimization_score = ev$score
         )
         attr(candidates[[idx]], "eval_result") <- ev
@@ -313,16 +306,29 @@ for (step_i in seq_len(max_steps)) {
   }
 
   step_table <- rbindlist(candidates, fill = TRUE)
-  setorderv(step_table, cols = c(METRIC_TO_OPTIMIZE, "mae", "max_error"), order = c(1, 1, 1))
+  order_cols <- intersect(c(METRIC_TO_OPTIMIZE, "mae", "max_error"), names(step_table))
+  order_dir <- if (METRIC_TO_OPTIMIZE == "r2") c(-1, rep(1, length(order_cols) - 1L)) else rep(1, length(order_cols))
+  setorderv(step_table, cols = order_cols, order = order_dir)
   best_row <- step_table[1]
+
+  if (!is_improvement(best_row$optimization_score, current_best_score, METRIC_TO_OPTIMIZE, MIN_IMPROVEMENT)) {
+    message(sprintf(
+      "Step %s did not improve %s beyond %.5f. Stopping.",
+      step_i, METRIC_TO_OPTIMIZE, MIN_IMPROVEMENT
+    ))
+    search_log[[step_i]] <- copy(step_table)
+    break
+  }
 
   selected <- c(selected, best_row$variable)
   selected_terms <- c(selected_terms, best_row$added_term)
   selected_transforms <- c(selected_transforms, best_row$transformation)
+  current_best_score <- best_row$optimization_score
 
   best_idx <- which(
     vapply(candidates, function(x) {
-      identical(x$variable[1], best_row$variable[1]) && identical(x$transformation[1], best_row$transformation[1])
+      identical(x$variable[1], best_row$variable[1]) &&
+        identical(x$transformation[1], best_row$transformation[1])
     }, logical(1))
   )[1]
   best_eval <- attr(candidates[[best_idx]], "eval_result")
@@ -340,24 +346,36 @@ for (step_i in seq_len(max_steps)) {
   ))
 }
 
-if (length(best_step_results) == 0) stop("No ZINB model could be fit successfully.")
-
-all_candidates <- rbindlist(search_log, fill = TRUE)
-best_by_step <- rbindlist(lapply(best_step_results, function(x) x$summary), fill = TRUE)
-
-best_global_idx <- which.min(best_by_step[[METRIC_TO_OPTIMIZE]])
-best_global <- best_step_results[[best_global_idx]]
-
-fwrite(all_candidates, file.path(OUTPUT_DIR, "zinb_all_candidates_by_step.csv"))
-if (length(failure_log) > 0) {
-  fwrite(rbindlist(failure_log, fill = TRUE), file.path(OUTPUT_DIR, "zinb_failed_candidates.csv"))
+if (length(search_log) > 0) {
+  safe_write_csv(rbindlist(search_log, fill = TRUE), file.path(OUTPUT_DIR, "zinb_all_candidates_by_step.csv"))
 }
-fwrite(best_by_step, file.path(OUTPUT_DIR, "zinb_best_model_per_step.csv"))
-fwrite(best_global$eval$fold_metrics, file.path(OUTPUT_DIR, "zinb_best_global_fold_metrics.csv"))
-fwrite(best_global$eval$overall, file.path(OUTPUT_DIR, "zinb_best_global_overall_metrics.csv"))
-fwrite(best_global$eval$predictions, file.path(OUTPUT_DIR, "zinb_best_global_cv_predictions.csv"))
+if (length(failure_log) > 0) {
+  safe_write_csv(rbindlist(failure_log, fill = TRUE), file.path(OUTPUT_DIR, "zinb_failed_candidates.csv"))
+}
 
-cat("Done. Files written to:", normalizePath(OUTPUT_DIR), "\n")
-cat("Best global formula:\n")
-print(best_global$eval$formula)
-print(best_global$eval$overall)
+if (length(best_step_results) == 0) {
+  safe_write_csv(baseline_eval$fold_metrics, file.path(OUTPUT_DIR, "zinb_best_global_fold_metrics.csv"))
+  safe_write_csv(baseline_eval$overall, file.path(OUTPUT_DIR, "zinb_best_global_overall_metrics.csv"))
+  safe_write_csv(baseline_eval$predictions, file.path(OUTPUT_DIR, "zinb_best_global_cv_predictions.csv"))
+  cat("Done. Files written to:", normalizePath(OUTPUT_DIR, mustWork = FALSE), "\n")
+  cat("No ZINB candidate improved on the intercept-only baseline.\n")
+  print(baseline_eval$overall)
+} else {
+  best_by_step <- rbindlist(lapply(best_step_results, function(x) x$summary), fill = TRUE)
+  best_global_idx <- if (METRIC_TO_OPTIMIZE == "r2") {
+    which.max(best_by_step[[METRIC_TO_OPTIMIZE]])
+  } else {
+    which.min(best_by_step[[METRIC_TO_OPTIMIZE]])
+  }
+  best_global <- best_step_results[[best_global_idx]]
+
+  safe_write_csv(best_by_step, file.path(OUTPUT_DIR, "zinb_best_model_per_step.csv"))
+  safe_write_csv(best_global$eval$fold_metrics, file.path(OUTPUT_DIR, "zinb_best_global_fold_metrics.csv"))
+  safe_write_csv(best_global$eval$overall, file.path(OUTPUT_DIR, "zinb_best_global_overall_metrics.csv"))
+  safe_write_csv(best_global$eval$predictions, file.path(OUTPUT_DIR, "zinb_best_global_cv_predictions.csv"))
+
+  cat("Done. Files written to:", normalizePath(OUTPUT_DIR, mustWork = FALSE), "\n")
+  cat("Best global formula:\n")
+  print(best_global$eval$formula)
+  print(best_global$eval$overall)
+}
