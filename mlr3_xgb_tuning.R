@@ -24,6 +24,8 @@ source_experiment_utils <- function() {
 UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
 CONFIG <- load_project_config(REPO_DIR)
+SCRIPT_NAME <- "mlr3_xgb_tuning"
+SCRIPT_PACKAGES <- c("data.table", "mlr3", "mlr3learners", "mlr3tuning", "paradox", "bbotk", "future", "xgboost")
 
 require_packages(c(
   "data.table", "mlr3", "mlr3learners", "mlr3tuning", "paradox", "bbotk", "future", "xgboost"
@@ -68,7 +70,7 @@ N_WORKERS <- get_int_setting("workers", "N_WORKERS", config_value(CONFIG, c("exp
 # Main
 # =========================
 .script_ok <- FALSE
-LOG_STATE <- start_logging(OUTPUT_DIR, "mlr3_xgb_tuning")
+LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
 
 set.seed(SEED)
 if (N_WORKERS > 1) {
@@ -163,4 +165,16 @@ safe_write_csv(best_params, file.path(OUTPUT_DIR, "xgb_best_params.csv"))
 log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
 print(overall_metrics)
 .script_ok <- TRUE
-stop_logging(LOG_STATE, if (.script_ok) "completed" else "failed")
+invisible(write_run_manifest(
+  output_dir = OUTPUT_DIR,
+  script_name = SCRIPT_NAME,
+  log_state = LOG_STATE,
+  repo_dir = REPO_DIR,
+  packages = SCRIPT_PACKAGES,
+  status = "completed",
+  seed = SEED,
+  data_path = DATA_PATH,
+  feature_cols = FEATURE_COLS,
+  n_workers = N_WORKERS
+))
+stop_logging(LOG_STATE, "completed")

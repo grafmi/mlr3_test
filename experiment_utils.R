@@ -487,6 +487,56 @@ safe_write_csv <- function(dt, path) {
   saveRDS(dt, rds_path)
 }
 
+safe_git_commit <- function(repo_dir) {
+  git_path <- Sys.which("git")
+  if (!nzchar(git_path)) return(NA_character_)
+
+  commit <- tryCatch(
+    system2(git_path, c("-C", repo_dir, "rev-parse", "HEAD"), stdout = TRUE, stderr = FALSE),
+    error = function(e) character(0)
+  )
+  if (length(commit) == 0) return(NA_character_)
+  trimws(commit[[1]])
+}
+
+package_versions_string <- function(packages) {
+  packages <- unique(packages[nzchar(packages)])
+  if (length(packages) == 0) return(NA_character_)
+
+  versions <- vapply(packages, function(pkg) {
+    if (!requireNamespace(pkg, quietly = TRUE)) return(NA_character_)
+    as.character(utils::packageVersion(pkg))
+  }, character(1))
+
+  paste(sprintf("%s==%s", packages, versions), collapse = "; ")
+}
+
+write_run_manifest <- function(output_dir, script_name, log_state, repo_dir,
+                               packages = character(0), status = "completed",
+                               seed = NA, data_path = NA_character_,
+                               feature_cols = character(0), n_workers = NA) {
+  started_at <- if (!is.null(log_state$started_at)) log_state$started_at else Sys.time()
+  ended_at <- Sys.time()
+  runtime_seconds <- as.numeric(difftime(ended_at, started_at, units = "secs"))
+
+  manifest <- data.table::data.table(
+    script_name = script_name,
+    status = status,
+    seed = if (length(seed) == 0) NA_real_ else as.numeric(seed)[1],
+    data_path = if (is.na(data_path)[1]) NA_character_ else normalizePath(data_path, mustWork = FALSE),
+    feature_list = if (length(feature_cols) > 0) paste(feature_cols, collapse = ", ") else NA_character_,
+    git_commit = safe_git_commit(repo_dir),
+    start_time = format(started_at, "%Y-%m-%d %H:%M:%S %Z"),
+    end_time = format(ended_at, "%Y-%m-%d %H:%M:%S %Z"),
+    runtime_seconds = runtime_seconds,
+    workers = if (length(n_workers) == 0) NA_real_ else as.numeric(n_workers)[1],
+    package_versions = package_versions_string(packages)
+  )
+
+  safe_write_csv(manifest, file.path(output_dir, "run_manifest.csv"))
+  manifest
+}
+
 write_tabular_dataset <- function(dt, path) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   ext <- file_extension(path)
@@ -598,6 +648,7 @@ start_logging <- function(output_dir, script_name) {
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   log_path <- file.path(output_dir, sprintf("%s.log", script_name))
   log_con <- file(log_path, open = "wt")
+  started_at <- Sys.time()
 
   sink(log_con, split = TRUE)
   sink(log_con, type = "message")
@@ -607,7 +658,7 @@ start_logging <- function(output_dir, script_name) {
   log_info("R version: ", R.version.string)
   log_info("Command: ", paste(commandArgs(), collapse = " "))
 
-  list(path = log_path, connection = log_con)
+  list(path = log_path, connection = log_con, started_at = started_at, script_name = script_name)
 }
 
 stop_logging <- function(log_state, status = "completed") {

@@ -24,6 +24,8 @@ source_experiment_utils <- function() {
 UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
 CONFIG <- load_project_config(REPO_DIR)
+SCRIPT_NAME <- "compare_best_models"
+SCRIPT_PACKAGES <- c("data.table")
 
 require_packages(c("data.table"))
 
@@ -97,7 +99,7 @@ rank_values <- function(values, metric) {
 # Main
 # =========================
 .script_ok <- FALSE
-LOG_STATE <- start_logging(OUTPUT_DIR, "compare_best_models")
+LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
 
 dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 log_info("Using metric to rank: ", METRIC_TO_RANK)
@@ -159,4 +161,12 @@ safe_write_csv(comparison, out_path)
 log_info("Done. Comparison written to: ", normalizePath(out_path, mustWork = FALSE))
 print(comparison)
 .script_ok <- TRUE
-stop_logging(LOG_STATE, if (.script_ok) "completed" else "failed")
+invisible(write_run_manifest(
+  output_dir = OUTPUT_DIR,
+  script_name = SCRIPT_NAME,
+  log_state = LOG_STATE,
+  repo_dir = REPO_DIR,
+  packages = SCRIPT_PACKAGES,
+  status = "completed"
+))
+stop_logging(LOG_STATE, "completed")

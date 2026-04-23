@@ -231,6 +231,7 @@ Each model script writes:
 *_overall_metrics.csv
 *_cv_predictions.csv
 *_best_params.csv or ZINB step-selection tables
+run_manifest.csv
 matching *.rds files for each CSV result
 *.log
 ```
@@ -245,6 +246,11 @@ outputs_model_comparison/compare_best_models.log
 
 Every CSV result is also saved as a same-named RDS file, for example
 `ranger_overall_metrics.csv` and `ranger_overall_metrics.rds`.
+
+Each script now also writes a small `run_manifest.csv` plus `run_manifest.rds`
+into its output directory. The manifest captures the seed, data path, feature
+list, git commit, start and end time, runtime, worker count, and package
+versions used for that run.
 
 The log files are written into the same output directory as the CSV files. They
 capture the script settings, progress messages, package output, warnings, and

@@ -24,6 +24,8 @@ source_experiment_utils <- function() {
 UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
 CONFIG <- load_project_config(REPO_DIR)
+SCRIPT_NAME <- "zinb_stepwise_cv"
+SCRIPT_PACKAGES <- c("data.table", "pscl", "splines", "parallel")
 
 require_packages(c("data.table", "pscl"))
 
@@ -289,7 +291,7 @@ evaluate_candidates_parallel <- function(candidate_specs, work_dt, target, fold_
 # Main
 # =========================
 .script_ok <- FALSE
-LOG_STATE <- start_logging(OUTPUT_DIR, "zinb_stepwise_cv")
+LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
 
 set.seed(SEED)
 df <- load_csv_checked(DATA_PATH)
@@ -432,7 +434,19 @@ if (length(best_step_results) == 0) {
   log_info("No ZINB candidate improved on the intercept-only baseline.")
   print(baseline_eval$overall)
   .script_ok <- TRUE
-  stop_logging(LOG_STATE, if (.script_ok) "completed" else "failed")
+  invisible(write_run_manifest(
+    output_dir = OUTPUT_DIR,
+    script_name = SCRIPT_NAME,
+    log_state = LOG_STATE,
+    repo_dir = REPO_DIR,
+    packages = SCRIPT_PACKAGES,
+    status = "completed",
+    seed = SEED,
+    data_path = DATA_PATH,
+    feature_cols = FEATURE_COLS,
+    n_workers = N_WORKERS
+  ))
+  stop_logging(LOG_STATE, "completed")
 } else {
   best_by_step <- rbindlist(lapply(best_step_results, function(x) x$summary), fill = TRUE)
   best_global_idx <- if (METRIC_TO_OPTIMIZE == "r2") {
@@ -452,5 +466,17 @@ if (length(best_step_results) == 0) {
   print(best_global$eval$formula)
   print(best_global$eval$overall)
   .script_ok <- TRUE
-  stop_logging(LOG_STATE, if (.script_ok) "completed" else "failed")
+  invisible(write_run_manifest(
+    output_dir = OUTPUT_DIR,
+    script_name = SCRIPT_NAME,
+    log_state = LOG_STATE,
+    repo_dir = REPO_DIR,
+    packages = SCRIPT_PACKAGES,
+    status = "completed",
+    seed = SEED,
+    data_path = DATA_PATH,
+    feature_cols = FEATURE_COLS,
+    n_workers = N_WORKERS
+  ))
+  stop_logging(LOG_STATE, "completed")
 }
