@@ -118,17 +118,18 @@ Common command-line overrides:
 ```sh
 Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --tune-evals=20 --workers=4
 Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
-Rscript zinb_stepwise_cv.R --metric=rmse --max-vars=3
+Rscript zinb_stepwise_cv.R --metric=rmse --max-vars=3 --workers=4
 Rscript compare_best_models.R --metric=rmse
 ```
 
 The same settings can be controlled with environment variables, for example
 `MLR3_DATA_PATH`, `N_FOLDS`, `TUNE_EVALS`, `N_WORKERS`,
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
-`COMPARISON_OUTPUT_DIR`.
+`COMPARISON_OUTPUT_DIR`. ZINB also supports `ZINB_WORKERS`, which takes
+precedence over `N_WORKERS` for that script.
 
 For reproducibility, the default worker count is `1`. Increase `--workers` for
-faster mlr3 runs when exact repeatability is less important.
+faster mlr3 runs and for parallel ZINB candidate evaluation on Linux.
 
 ## Outputs
 

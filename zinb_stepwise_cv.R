@@ -51,6 +51,7 @@ STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", 10, min_value = 2)
 MAX_VARS <- get_numeric_setting("max-vars", "ZINB_MAX_VARS", Inf, min_value = 1)
 MIN_IMPROVEMENT <- get_numeric_setting("min-improvement", "ZINB_MIN_IMPROVEMENT", 0, min_value = 0)
 METRIC_TO_OPTIMIZE <- get_setting("metric", "METRIC_TO_OPTIMIZE", "rmse")
+N_WORKERS <- get_int_setting("workers", "ZINB_WORKERS", Sys.getenv("N_WORKERS", unset = "1"), min_value = 1)
 TRANSFORMATIONS_NUMERIC <- c("raw", "sqrt", "log1p", "ns2", "poly2")
 TRANSFORMATIONS_FACTOR <- c("raw")
 USE_SAME_FORMULA_FOR_ZERO_PART <- isTRUE(tolower(get_setting("same-zero-formula", "ZINB_SAME_ZERO_FORMULA", "false")) %in% c("1", "true", "yes"))
@@ -209,6 +210,67 @@ is_improvement <- function(candidate_score, current_score, metric, min_improveme
   candidate_score < current_score - min_improvement
 }
 
+evaluate_candidate <- function(spec, work_dt, target, fold_ids, metric) {
+  ev <- evaluate_formula_cv(work_dt, target, fold_ids, spec$formula_obj, metric = metric)
+
+  if (isTRUE(ev$ok)) {
+    summary <- data.table(
+      step = spec$step,
+      candidate_order = spec$candidate_order,
+      variable = spec$variable,
+      transformation = spec$transformation,
+      added_term = spec$term,
+      formula = formula_label(spec$formula_obj),
+      rmse = ev$overall$rmse,
+      mae = ev$overall$mae,
+      max_error = ev$overall$max_error,
+      sae = ev$overall$sae,
+      mse = ev$overall$mse,
+      bias = ev$overall$bias,
+      r2 = ev$overall$r2,
+      optimization_score = ev$score
+    )
+    return(list(ok = TRUE, summary = summary, eval = ev))
+  }
+
+  list(
+    ok = FALSE,
+    failure = data.table(
+      step = spec$step,
+      candidate_order = spec$candidate_order,
+      variable = spec$variable,
+      transformation = spec$transformation,
+      added_term = spec$term,
+      formula = formula_label(spec$formula_obj),
+      reason = ev$reason
+    )
+  )
+}
+
+evaluate_candidates_parallel <- function(candidate_specs, work_dt, target, fold_ids, metric, workers) {
+  if (length(candidate_specs) == 0) return(list())
+  if (workers <= 1) {
+    return(lapply(candidate_specs, evaluate_candidate, work_dt = work_dt, target = target, fold_ids = fold_ids, metric = metric))
+  }
+
+  if (.Platform$OS.type != "unix") {
+    message("Parallel ZINB candidate evaluation uses forked workers and is only enabled on Unix-like systems. Falling back to sequential execution.")
+    return(lapply(candidate_specs, evaluate_candidate, work_dt = work_dt, target = target, fold_ids = fold_ids, metric = metric))
+  }
+
+  parallel::mclapply(
+    candidate_specs,
+    evaluate_candidate,
+    work_dt = work_dt,
+    target = target,
+    fold_ids = fold_ids,
+    metric = metric,
+    mc.cores = min(workers, length(candidate_specs)),
+    mc.preschedule = FALSE,
+    mc.set.seed = TRUE
+  )
+}
+
 # =========================
 # Main
 # =========================
@@ -220,7 +282,7 @@ dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 cat("Using data file:", normalizePath(DATA_PATH, mustWork = FALSE), "\n")
 cat("Using output directory:", normalizePath(OUTPUT_DIR, mustWork = FALSE), "\n")
 cat("Using features:", paste(FEATURE_COLS, collapse = ", "), "\n")
-cat("Using folds / metric:", N_FOLDS, "/", METRIC_TO_OPTIMIZE, "\n")
+cat("Using folds / metric / workers:", N_FOLDS, "/", METRIC_TO_OPTIMIZE, "/", N_WORKERS, "\n")
 
 predictor_pool <- FEATURE_COLS
 fold_ids <- make_stratified_fold_ids(work_dt[[TARGET]], nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
@@ -246,8 +308,8 @@ for (step_i in seq_len(max_steps)) {
   remaining <- setdiff(predictor_pool, selected)
   if (length(remaining) == 0) break
 
-  candidates <- list()
-  idx <- 1L
+  candidate_specs <- list()
+  spec_idx <- 1L
 
   for (v in remaining) {
     tfms <- valid_transformations(work_dt[[v]])
@@ -266,38 +328,31 @@ for (step_i in seq_len(max_steps)) {
     for (tfm in tfms) {
       term <- term_for(v, tfm)
       terms_now <- c(selected_terms, term)
-      formula_obj <- make_formula(TARGET, terms_now, same_zero_formula = USE_SAME_FORMULA_FOR_ZERO_PART)
-      ev <- evaluate_formula_cv(work_dt, TARGET, fold_ids, formula_obj, metric = METRIC_TO_OPTIMIZE)
-
-      if (isTRUE(ev$ok)) {
-        candidates[[idx]] <- data.table(
-          step = step_i,
-          variable = v,
-          transformation = tfm,
-          added_term = term,
-          formula = formula_label(formula_obj),
-          rmse = ev$overall$rmse,
-          mae = ev$overall$mae,
-          max_error = ev$overall$max_error,
-          sae = ev$overall$sae,
-          mse = ev$overall$mse,
-          bias = ev$overall$bias,
-          r2 = ev$overall$r2,
-          optimization_score = ev$score
-        )
-        attr(candidates[[idx]], "eval_result") <- ev
-        idx <- idx + 1L
-      } else {
-        failure_log[[length(failure_log) + 1L]] <- data.table(
-          step = step_i,
-          variable = v,
-          transformation = tfm,
-          added_term = term,
-          formula = formula_label(formula_obj),
-          reason = ev$reason
-        )
-      }
+      candidate_specs[[spec_idx]] <- list(
+        step = step_i,
+        candidate_order = spec_idx,
+        variable = v,
+        transformation = tfm,
+        term = term,
+        formula_obj = make_formula(TARGET, terms_now, same_zero_formula = USE_SAME_FORMULA_FOR_ZERO_PART)
+      )
+      spec_idx <- spec_idx + 1L
     }
+  }
+
+  results <- evaluate_candidates_parallel(
+    candidate_specs,
+    work_dt = work_dt,
+    target = TARGET,
+    fold_ids = fold_ids,
+    metric = METRIC_TO_OPTIMIZE,
+    workers = N_WORKERS
+  )
+
+  candidates <- Filter(function(x) isTRUE(x$ok), results)
+  failures <- Filter(function(x) !isTRUE(x$ok), results)
+  if (length(failures) > 0) {
+    failure_log <- c(failure_log, lapply(failures, `[[`, "failure"))
   }
 
   if (length(candidates) == 0) {
@@ -305,8 +360,9 @@ for (step_i in seq_len(max_steps)) {
     break
   }
 
-  step_table <- rbindlist(candidates, fill = TRUE)
+  step_table <- rbindlist(lapply(candidates, `[[`, "summary"), fill = TRUE)
   order_cols <- intersect(c(METRIC_TO_OPTIMIZE, "mae", "max_error"), names(step_table))
+  order_cols <- c(order_cols, "candidate_order")
   order_dir <- if (METRIC_TO_OPTIMIZE == "r2") c(-1, rep(1, length(order_cols) - 1L)) else rep(1, length(order_cols))
   setorderv(step_table, cols = order_cols, order = order_dir)
   best_row <- step_table[1]
@@ -327,13 +383,14 @@ for (step_i in seq_len(max_steps)) {
 
   best_idx <- which(
     vapply(candidates, function(x) {
-      identical(x$variable[1], best_row$variable[1]) &&
-        identical(x$transformation[1], best_row$transformation[1])
+      identical(x$summary$variable[1], best_row$variable[1]) &&
+        identical(x$summary$transformation[1], best_row$transformation[1])
     }, logical(1))
   )[1]
-  best_eval <- attr(candidates[[best_idx]], "eval_result")
+  best_eval <- candidates[[best_idx]]$eval
 
   step_summary <- copy(best_row)
+  step_summary[, candidate_order := NULL]
   step_summary[, selected_variables := paste(selected, collapse = " | ")]
   step_summary[, selected_terms := paste(selected_terms, collapse = " + ")]
 
