@@ -109,6 +109,15 @@ Rscript zinb_stepwise_cv.R
 Rscript compare_best_models.R
 ```
 
+For Linux, you can also run the complete pipeline with:
+
+```sh
+./run_all.sh
+```
+
+The wrapper resolves paths relative to the repository, checks that `Rscript` and
+the input data exist, then runs the four scripts in sequence.
+
 The scripts also work when sourced interactively from VS Code, RStudio Pro, or
 Positron, as long as `experiment_utils.R` is either next to the script or in the
 current working directory.
@@ -127,6 +136,17 @@ The same settings can be controlled with environment variables, for example
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
 `COMPARISON_OUTPUT_DIR`. ZINB also supports `ZINB_WORKERS`, which takes
 precedence over `N_WORKERS` for that script.
+
+Example full run with explicit output directories:
+
+```sh
+MLR3_DATA_PATH=/path/to/data.csv \
+RANGER_OUTPUT_DIR=/tmp/outputs_ranger \
+XGB_OUTPUT_DIR=/tmp/outputs_xgb \
+ZINB_OUTPUT_DIR=/tmp/outputs_zinb \
+COMPARISON_OUTPUT_DIR=/tmp/outputs_model_comparison \
+./run_all.sh
+```
 
 For reproducibility, the default worker count is `1`. Increase `--workers` for
 faster mlr3 runs and for parallel ZINB candidate evaluation on Linux.
