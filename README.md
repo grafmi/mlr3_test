@@ -234,6 +234,15 @@ The scripts use this precedence order:
 2. environment variable
 3. `config.R`
 
+You can also set an explicit data path directly in `config.R`, which is often
+the most convenient option for day-to-day experimentation:
+
+```r
+CONFIG$experiment$data_path <- "/absolute/path/to/my_dataset.csv"
+```
+
+Absolute paths, repo-relative paths, and `~/...` paths are supported.
+
 ## Outputs
 
 Generated files are written to:
