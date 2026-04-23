@@ -183,6 +183,29 @@ with_run_finalizer({
 
   out_path <- file.path(OUTPUT_DIR, "best_models_comparison.csv")
   safe_write_csv(comparison, out_path)
+  best_row <- comparison[!is.na(rank)][order(rank)][1]
+  report_lines <- c(
+    sprintf("# %s Report", SCRIPT_NAME),
+    "",
+    "## Ranking",
+    sprintf("- ranking_metric: `%s`", METRIC_TO_RANK),
+    sprintf("- ranger_dir: `%s`", normalizePath(RANGER_DIR, mustWork = FALSE)),
+    sprintf("- xgb_dir: `%s`", normalizePath(XGB_DIR, mustWork = FALSE)),
+    sprintf("- zinb_dir: `%s`", normalizePath(ZINB_DIR, mustWork = FALSE)),
+    "",
+    "## Best Model",
+    sprintf("- model: `%s`", best_row$model[[1]]),
+    sprintf("- rmse: `%s`", best_row$rmse[[1]]),
+    sprintf("- mae: `%s`", best_row$mae[[1]]),
+    sprintf("- r2: `%s`", best_row$r2[[1]]),
+    sprintf("- poisson_deviance: `%s`", best_row$poisson_deviance[[1]]),
+    sprintf("- negloglik: `%s`", best_row$negloglik[[1]]),
+    "",
+    "## Notes",
+    "- availability_status indicates whether the model outputs were complete and comparable.",
+    "- models with missing or failed runs remain visible in the comparison table."
+  )
+  write_text_file(file.path(OUTPUT_DIR, "comparison_report.md"), report_lines)
 
   log_info("Done. Comparison written to: ", normalizePath(out_path, mustWork = FALSE))
   print(comparison)

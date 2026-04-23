@@ -571,6 +571,110 @@ write_run_manifest <- function(output_dir, script_name, log_state, repo_dir,
   manifest
 }
 
+write_text_file <- function(path, lines) {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  writeLines(as.character(lines), con = path, useBytes = TRUE)
+  invisible(path)
+}
+
+write_config_snapshot <- function(output_dir, resolved_config, prefix = "resolved_config") {
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  saveRDS(resolved_config, file.path(output_dir, paste0(prefix, ".rds")))
+  write_text_file(
+    file.path(output_dir, paste0(prefix, ".txt")),
+    capture.output(str(resolved_config, max.level = 4, give.attr = FALSE))
+  )
+}
+
+dataset_overview <- function(dt, target = NULL, feature_cols = character(0), id_cols = character(0)) {
+  factor_cols <- names(which(vapply(dt, is.factor, logical(1))))
+  numeric_cols <- names(which(vapply(dt, is.numeric, logical(1))))
+
+  data.table::data.table(
+    n_rows = nrow(dt),
+    n_cols = ncol(dt),
+    target = if (is.null(target)) NA_character_ else target,
+    n_features = length(feature_cols),
+    feature_list = if (length(feature_cols) > 0) paste(feature_cols, collapse = ", ") else NA_character_,
+    id_cols = if (length(id_cols) > 0) paste(id_cols, collapse = ", ") else NA_character_,
+    n_factor_cols = length(factor_cols),
+    factor_cols = if (length(factor_cols) > 0) paste(factor_cols, collapse = ", ") else NA_character_,
+    n_numeric_cols = length(numeric_cols),
+    numeric_cols = if (length(numeric_cols) > 0) paste(numeric_cols, collapse = ", ") else NA_character_
+  )
+}
+
+log_dataset_overview <- function(dt, target = NULL, feature_cols = character(0), id_cols = character(0),
+                                 metric = NULL, extra = NULL) {
+  overview <- dataset_overview(dt, target = target, feature_cols = feature_cols, id_cols = id_cols)
+  log_info("Dataset rows / cols: ", overview$n_rows[[1]], " / ", overview$n_cols[[1]])
+  if (!is.null(target)) log_info("Target: ", target)
+  if (length(feature_cols) > 0) log_info("Feature columns: ", overview$feature_list[[1]])
+  if (length(id_cols) > 0) log_info("Identifier columns: ", overview$id_cols[[1]])
+  log_info("Factor columns: ", overview$n_factor_cols[[1]], " | Numeric columns: ", overview$n_numeric_cols[[1]])
+  if (!is.null(metric) && nzchar(metric)) log_info("Optimization / ranking metric: ", metric)
+  if (!is.null(extra) && length(extra) > 0) {
+    for (label in names(extra)) {
+      log_info(label, ": ", extra[[label]])
+    }
+  }
+  invisible(overview)
+}
+
+append_registry_entry <- function(registry_path, row_dt, key_cols = "run_id") {
+  dir.create(dirname(registry_path), recursive = TRUE, showWarnings = FALSE)
+  existing <- read_csv_if_exists(registry_path)
+  if (is.null(existing)) {
+    updated <- data.table::as.data.table(data.table::copy(row_dt))
+  } else {
+    existing <- data.table::as.data.table(existing)
+    row_dt <- data.table::as.data.table(data.table::copy(row_dt))
+    if (!all(key_cols %in% names(row_dt))) {
+      stop("Registry row is missing required key column(s): ", paste(setdiff(key_cols, names(row_dt)), collapse = ", "), call. = FALSE)
+    }
+    if (!all(key_cols %in% names(existing))) {
+      updated <- data.table::rbindlist(list(existing, row_dt), fill = TRUE)
+    } else {
+      existing_keys <- do.call(paste, c(existing[, ..key_cols], sep = "\r"))
+      new_keys <- do.call(paste, c(row_dt[, ..key_cols], sep = "\r"))
+      existing <- existing[!existing_keys %in% new_keys]
+      updated <- data.table::rbindlist(list(existing, row_dt), fill = TRUE)
+    }
+  }
+  safe_write_csv(updated, registry_path)
+  invisible(updated)
+}
+
+coerce_value_for_param <- function(value) {
+  if (length(value) != 1) return(value)
+  if (is.logical(value) || is.numeric(value) || is.integer(value)) return(value)
+  if (is.character(value)) {
+    lower <- tolower(value)
+    if (lower %in% c("true", "false")) return(lower == "true")
+    numeric_value <- suppressWarnings(as.numeric(value))
+    if (!is.na(numeric_value)) {
+      if (grepl("^[+-]?[0-9]+$", value)) return(as.integer(numeric_value))
+      return(numeric_value)
+    }
+  }
+  value
+}
+
+extract_param_values_from_tuning <- function(dt, sort_measure = "regr.rmse") {
+  if (is.null(dt) || nrow(dt) == 0) return(list())
+  rows <- data.table::as.data.table(data.table::copy(dt))
+  if (sort_measure %in% names(rows)) data.table::setorderv(rows, sort_measure, order = 1L)
+  row <- rows[1]
+  drop_cols <- c(
+    "outer_fold", "regr.rmse", "warnings", "errors", "batch_nr", "runtime_learners",
+    "timestamp", "uhash", "learner_param_vals", "x_domain", "resample_result"
+  )
+  keep_cols <- setdiff(names(row), drop_cols)
+  values <- lapply(keep_cols, function(col) coerce_value_for_param(row[[col]][[1]]))
+  names(values) <- keep_cols
+  values
+}
+
 read_csv_if_exists <- function(path) {
   if (!file.exists(path)) return(NULL)
   data.table::fread(path)

@@ -43,6 +43,7 @@ The most relevant outputs per script are:
 
 - metrics as `.csv` and `.rds`
 - predictions as `.csv` and `.rds`
+- human-readable reports as `.md` or `.txt`
 - logs as `*.log`
 - run metadata as `run_manifest.csv` and `run_manifest.rds`
 
@@ -55,6 +56,9 @@ The most relevant outputs per script are:
 - `compare_best_models.R`: read the best model outputs and create a ranked comparison
 - `validate_repo.R`: quick repository smoke check for packages, config, data, and output paths
 - `run_regression_tests.R`: lightweight regression suite for key failure and reporting paths
+
+The training and comparison scripts now also write small transparency artifacts
+such as config snapshots, model reports, dataset overviews, and summary files.
 
 ## Validation Design
 
@@ -196,7 +200,8 @@ For Linux, you can also run the complete pipeline with:
 The wrapper resolves paths relative to the repository, checks that `Rscript` and
 the input data exist, then runs the four scripts in sequence.
 At the end of a successful full run it also writes a small run-level summary in
-the run root directory.
+the run root directory, including a run report, config snapshot, and registry
+entry under the results root.
 
 By default, `run_all.sh` versions each full run under a timestamped directory:
 
@@ -283,6 +288,15 @@ The full-run wrapper also writes:
 
 - `run_summary.csv` and `run_summary.rds`
 - `run_summary_scripts.csv` and `run_summary_scripts.rds`
+- `run_context.csv` and `run_context.rds`
+- `run_report.md`
+- `config_snapshot.R`
+- `config_snapshot.txt` and `config_snapshot.rds`
+
+The results root also keeps a simple cross-run registry:
+
+- `results/run_registry.csv`
+- `results/run_registry.rds`
 
 The run manifest is intended to make later comparisons easier. It includes:
 
@@ -301,6 +315,22 @@ If a script fails after logging has started, it still writes a manifest with
 `status = failed` and closes the log cleanly.
 The run summary gives you a compact view over the script statuses, the overall
 run status, and the top-ranked model from the comparison step.
+
+The per-script reports and transparency files include:
+
+- `resolved_config.txt` and `resolved_config.rds`
+- `*_dataset_overview.csv` and `.rds`
+- `*_model_report.md` or `comparison_report.md`
+- feature importance files for `ranger` and `xgboost` when the final diagnostic
+  fit succeeds
+
+Additional ZINB transparency outputs include:
+
+- `zinb_step_diagnostics.csv` and `.rds`
+- `zinb_top_candidates_by_step.csv` and `.rds`
+- `zinb_final_model_summary.csv` / `.txt`
+- `zinb_final_model_count_coefficients.csv`
+- `zinb_final_model_zero_coefficients.csv`
 
 `run_regression_tests.R` currently covers:
 

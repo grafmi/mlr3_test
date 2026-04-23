@@ -264,6 +264,37 @@ fit_predict_one_fold <- function(train_dt, test_dt, formula_obj) {
   )
 }
 
+fit_zinb_model <- function(dt, formula_obj) {
+  fit_warnings <- character(0)
+  fit <- tryCatch(
+    withCallingHandlers(
+      zeroinfl(
+        formula_obj,
+        data = dt,
+        dist = "negbin",
+        EM = TRUE,
+        control = zeroinfl.control(maxit = 100)
+      ),
+      warning = function(w) {
+        fit_warnings <<- c(fit_warnings, conditionMessage(w))
+        invokeRestart("muffleWarning")
+      }
+    ),
+    error = function(e) structure(list(message = conditionMessage(e)), class = "zinb_fit_error")
+  )
+
+  if (inherits(fit, "zinb_fit_error")) {
+    return(list(ok = FALSE, reason = sprintf("fit failed: %s", fit$message)))
+  }
+
+  convergence_reason <- fit_convergence_reason(fit, warnings = fit_warnings)
+  if (!is.na(convergence_reason)) {
+    return(list(ok = FALSE, reason = convergence_reason))
+  }
+
+  list(ok = TRUE, model = fit)
+}
+
 evaluate_formula_cv <- function(dt, target, fold_ids, formula_obj, metric = "rmse") {
   n_folds <- max(fold_ids)
   fold_results <- vector("list", n_folds)
@@ -387,12 +418,43 @@ with_run_finalizer({
   df <- load_csv_checked(DATA_PATH)
   work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS, require_count_target = TRUE)
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+  resolved_config <- list(
+    script_name = SCRIPT_NAME,
+    data_path = normalizePath(DATA_PATH, mustWork = FALSE),
+    output_dir = normalizePath(OUTPUT_DIR, mustWork = FALSE),
+    target = TARGET,
+    feature_cols = FEATURE_COLS,
+    id_cols = ID_COLS,
+    seed = SEED,
+    n_folds = N_FOLDS,
+    strata_bins = STRATA_BINS,
+    metric = METRIC_TO_OPTIMIZE,
+    max_vars = MAX_VARS,
+    min_improvement = MIN_IMPROVEMENT,
+    workers = N_WORKERS,
+    zero_inflation_formula = ZERO_INFLATION_FORMULA,
+    transformations_numeric = TRANSFORMATIONS_NUMERIC,
+    transformations_factor = TRANSFORMATIONS_FACTOR
+  )
+  write_config_snapshot(OUTPUT_DIR, resolved_config)
 
   log_info("Using data file: ", normalizePath(DATA_PATH, mustWork = FALSE))
   log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
-  log_info("Using features: ", paste(FEATURE_COLS, collapse = ", "))
-  log_info("Using folds / metric / workers: ", N_FOLDS, " / ", METRIC_TO_OPTIMIZE, " / ", N_WORKERS)
-  log_info("Using zero-inflation formula: ", ZERO_INFLATION_FORMULA)
+  log_dataset_overview(
+    work_dt,
+    target = TARGET,
+    feature_cols = FEATURE_COLS,
+    id_cols = ID_COLS,
+    metric = METRIC_TO_OPTIMIZE,
+    extra = list(
+      "Folds" = N_FOLDS,
+      "Workers" = N_WORKERS,
+      "Zero-inflation formula" = ZERO_INFLATION_FORMULA,
+      "Max vars / min improvement" = paste(MAX_VARS, MIN_IMPROVEMENT, sep = " / ")
+    )
+  )
+  overview_dt <- dataset_overview(work_dt, target = TARGET, feature_cols = FEATURE_COLS, id_cols = ID_COLS)
+  safe_write_csv(overview_dt, file.path(OUTPUT_DIR, "zinb_dataset_overview.csv"))
 
   validate_zinb_setup(work_dt, TARGET, FEATURE_COLS, ZERO_INFLATION_FORMULA)
 
@@ -413,12 +475,18 @@ with_run_finalizer({
   search_log <- list()
   failure_log <- list()
   best_step_results <- list()
+  step_diagnostics <- list()
+  top_candidates_log <- list()
+  stop_reason <- NA_character_
 
   max_steps <- min(length(predictor_pool), MAX_VARS)
 
   for (step_i in seq_len(max_steps)) {
     remaining <- setdiff(predictor_pool, selected)
-    if (length(remaining) == 0) break
+    if (length(remaining) == 0) {
+      stop_reason <- "no_remaining_predictors"
+      break
+    }
 
     candidate_specs <- list()
     spec_idx <- 1L
@@ -452,6 +520,8 @@ with_run_finalizer({
       }
     }
 
+    n_candidates_total <- length(candidate_specs)
+
     results <- evaluate_candidates_parallel(
       candidate_specs,
       work_dt = work_dt,
@@ -463,12 +533,27 @@ with_run_finalizer({
 
     candidates <- Filter(function(x) isTRUE(x$ok), results)
     failures <- Filter(function(x) !isTRUE(x$ok), results)
+    n_candidates_valid <- length(candidates)
+    n_candidates_failed <- length(failures)
     if (length(failures) > 0) {
       failure_log <- c(failure_log, lapply(failures, `[[`, "failure"))
     }
 
     if (length(candidates) == 0) {
+      step_diagnostics[[length(step_diagnostics) + 1L]] <- data.table(
+        step = step_i,
+        n_candidates_total = n_candidates_total,
+        n_candidates_valid = n_candidates_valid,
+        n_candidates_failed = n_candidates_failed,
+        best_variable = NA_character_,
+        best_transformation = NA_character_,
+        best_formula = NA_character_,
+        best_score = NA_real_,
+        selected = FALSE,
+        stop_reason = "no_valid_candidate"
+      )
       log_info("No valid candidate found at step ", step_i, ". Stopping.")
+      stop_reason <- "no_valid_candidate"
       break
     }
 
@@ -477,11 +562,29 @@ with_run_finalizer({
     order_cols <- c(order_cols, "candidate_order")
     order_dir <- if (METRIC_TO_OPTIMIZE == "r2") c(-1, rep(1, length(order_cols) - 1L)) else rep(1, length(order_cols))
     setorderv(step_table, cols = order_cols, order = order_dir)
+    top_candidates <- copy(head(step_table, 3))
+    top_candidates[, rank_within_step := seq_len(.N)]
+    top_candidates_log[[length(top_candidates_log) + 1L]] <- top_candidates
     best_row <- step_table[1]
+    improved <- is_improvement(best_row$optimization_score, current_best_score, METRIC_TO_OPTIMIZE, MIN_IMPROVEMENT)
 
-    if (!is_improvement(best_row$optimization_score, current_best_score, METRIC_TO_OPTIMIZE, MIN_IMPROVEMENT)) {
+    step_diagnostics[[length(step_diagnostics) + 1L]] <- data.table(
+      step = step_i,
+      n_candidates_total = n_candidates_total,
+      n_candidates_valid = n_candidates_valid,
+      n_candidates_failed = n_candidates_failed,
+      best_variable = best_row$variable,
+      best_transformation = best_row$transformation,
+      best_formula = best_row$formula,
+      best_score = best_row$optimization_score,
+      selected = improved,
+      stop_reason = if (improved) NA_character_ else "no_min_improvement"
+    )
+
+    if (!improved) {
       log_info("Step ", step_i, " did not improve ", METRIC_TO_OPTIMIZE, " beyond ", sprintf("%.5f", MIN_IMPROVEMENT), ". Stopping.")
       search_log[[step_i]] <- copy(step_table)
+      stop_reason <- "no_min_improvement"
       break
     }
 
@@ -515,9 +618,20 @@ with_run_finalizer({
   if (length(search_log) > 0) {
     safe_write_csv(rbindlist(search_log, fill = TRUE), file.path(OUTPUT_DIR, "zinb_all_candidates_by_step.csv"))
   }
+  if (length(top_candidates_log) > 0) {
+    safe_write_csv(rbindlist(top_candidates_log, fill = TRUE), file.path(OUTPUT_DIR, "zinb_top_candidates_by_step.csv"))
+  }
+  if (length(step_diagnostics) > 0) {
+    safe_write_csv(rbindlist(step_diagnostics, fill = TRUE), file.path(OUTPUT_DIR, "zinb_step_diagnostics.csv"))
+  }
   if (length(failure_log) > 0) {
     safe_write_csv(rbindlist(failure_log, fill = TRUE), file.path(OUTPUT_DIR, "zinb_failed_candidates.csv"))
   }
+
+  final_formula_obj <- baseline_formula
+  final_summary_line <- "intercept-only baseline"
+  final_selected_terms <- character(0)
+  final_selected_variables <- character(0)
 
   if (length(best_step_results) == 0) {
     safe_write_csv(baseline_eval$fold_metrics, file.path(OUTPUT_DIR, "zinb_best_global_fold_metrics.csv"))
@@ -526,6 +640,7 @@ with_run_finalizer({
     log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
     log_info("No ZINB candidate improved on the intercept-only baseline.")
     print(baseline_eval$overall)
+    if (is.na(stop_reason)) stop_reason <- "baseline_retained"
     .script_ok <- TRUE
   } else {
     best_by_step <- rbindlist(lapply(best_step_results, function(x) x$summary), fill = TRUE)
@@ -540,13 +655,97 @@ with_run_finalizer({
     safe_write_csv(best_global$eval$fold_metrics, file.path(OUTPUT_DIR, "zinb_best_global_fold_metrics.csv"))
     safe_write_csv(best_global$eval$overall, file.path(OUTPUT_DIR, "zinb_best_global_overall_metrics.csv"))
     safe_write_csv(best_global$eval$predictions, file.path(OUTPUT_DIR, "zinb_best_global_cv_predictions.csv"))
+    final_formula_obj <- best_global$eval$formula
+    final_summary_line <- formula_label(final_formula_obj)
+    final_selected_terms <- selected_terms
+    final_selected_variables <- selected
 
     log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
     log_info("Best global formula:")
     print(best_global$eval$formula)
     print(best_global$eval$overall)
+    if (is.na(stop_reason)) {
+      remaining_after_selection <- setdiff(predictor_pool, selected)
+      stop_reason <- if (length(remaining_after_selection) == 0) "no_remaining_predictors" else "max_steps_reached"
+    }
     .script_ok <- TRUE
   }
+
+  final_fit <- fit_zinb_model(work_dt, final_formula_obj)
+  if (isTRUE(final_fit$ok)) {
+    final_fit_summary <- summary(final_fit$model)
+    count_coef <- data.table::as.data.table(final_fit_summary$coefficients$count, keep.rownames = "term")
+    zero_coef <- data.table::as.data.table(final_fit_summary$coefficients$zero, keep.rownames = "term")
+    safe_write_csv(count_coef, file.path(OUTPUT_DIR, "zinb_final_model_count_coefficients.csv"))
+    safe_write_csv(zero_coef, file.path(OUTPUT_DIR, "zinb_final_model_zero_coefficients.csv"))
+
+    model_summary_dt <- data.table(
+      formula = formula_label(final_formula_obj),
+      zero_inflation_formula = ZERO_INFLATION_FORMULA,
+      stop_reason = stop_reason,
+      n_selected_variables = length(final_selected_variables),
+      selected_variables = if (length(final_selected_variables) > 0) paste(final_selected_variables, collapse = ", ") else NA_character_,
+      selected_terms = if (length(final_selected_terms) > 0) paste(final_selected_terms, collapse = " + ") else NA_character_,
+      theta = final_fit$model$theta,
+      loglik = as.numeric(logLik(final_fit$model)),
+      aic = AIC(final_fit$model),
+      bic = BIC(final_fit$model)
+    )
+    safe_write_csv(model_summary_dt, file.path(OUTPUT_DIR, "zinb_final_model_summary.csv"))
+    write_text_file(
+      file.path(OUTPUT_DIR, "zinb_final_model_summary.txt"),
+      c(
+        sprintf("Formula: %s", formula_label(final_formula_obj)),
+        sprintf("Zero-inflation formula: %s", ZERO_INFLATION_FORMULA),
+        sprintf("Stop reason: %s", stop_reason),
+        sprintf("Theta: %s", format(final_fit$model$theta, digits = 8)),
+        sprintf("LogLik: %s", format(as.numeric(logLik(final_fit$model)), digits = 8)),
+        sprintf("AIC: %s", format(AIC(final_fit$model), digits = 8)),
+        sprintf("BIC: %s", format(BIC(final_fit$model), digits = 8))
+      )
+    )
+  } else {
+    log_info("Warning: final ZINB model summary could not be created: ", final_fit$reason)
+  }
+
+  report_lines <- c(
+    sprintf("# %s Report", SCRIPT_NAME),
+    "",
+    "## Run",
+    sprintf("- data_path: `%s`", normalizePath(DATA_PATH, mustWork = FALSE)),
+    sprintf("- output_dir: `%s`", normalizePath(OUTPUT_DIR, mustWork = FALSE)),
+    sprintf("- target: `%s`", TARGET),
+    sprintf("- feature_cols: `%s`", paste(FEATURE_COLS, collapse = ", ")),
+    sprintf("- zero_inflation_formula: `%s`", ZERO_INFLATION_FORMULA),
+    sprintf("- seed: `%s`", SEED),
+    sprintf("- folds: `%s`", N_FOLDS),
+    sprintf("- workers: `%s`", N_WORKERS),
+    sprintf("- optimization_metric: `%s`", METRIC_TO_OPTIMIZE),
+    sprintf("- stop_reason: `%s`", stop_reason),
+    "",
+    "## Dataset",
+    sprintf("- rows: `%s`", overview_dt$n_rows[[1]]),
+    sprintf("- cols: `%s`", overview_dt$n_cols[[1]]),
+    sprintf("- factor_cols: `%s`", overview_dt$n_factor_cols[[1]]),
+    "",
+    "## Final Model",
+    sprintf("- formula: `%s`", final_summary_line),
+    sprintf("- selected_variables: `%s`", if (length(final_selected_variables) > 0) paste(final_selected_variables, collapse = ", ") else "<none>"),
+    sprintf("- selected_terms: `%s`", if (length(final_selected_terms) > 0) paste(final_selected_terms, collapse = " + ") else "<baseline>"),
+    "",
+    "## Outputs",
+    "- `zinb_step_diagnostics.csv` / `.rds`",
+    "- `zinb_top_candidates_by_step.csv` / `.rds`",
+    "- `zinb_all_candidates_by_step.csv` / `.rds`",
+    "- `zinb_failed_candidates.csv` / `.rds`",
+    "- `zinb_best_model_per_step.csv` / `.rds`",
+    "- `zinb_final_model_summary.csv` / `.rds`",
+    "- `zinb_final_model_count_coefficients.csv` / `.rds`",
+    "- `zinb_final_model_zero_coefficients.csv` / `.rds`",
+    "- `resolved_config.txt` / `.rds`",
+    "- `run_manifest.csv` / `.rds`"
+  )
+  write_text_file(file.path(OUTPUT_DIR, "zinb_model_report.md"), report_lines)
 }, function() finalize_run(
   log_state = LOG_STATE,
   output_dir = OUTPUT_DIR,

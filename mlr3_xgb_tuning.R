@@ -89,14 +89,39 @@ with_run_finalizer({
   work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS)
   work_dt <- encode_factor_features(work_dt, TARGET)
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+  resolved_config <- list(
+    script_name = SCRIPT_NAME,
+    data_path = normalizePath(DATA_PATH, mustWork = FALSE),
+    output_dir = normalizePath(OUTPUT_DIR, mustWork = FALSE),
+    target = TARGET,
+    feature_cols = FEATURE_COLS,
+    id_cols = ID_COLS,
+    seed = SEED,
+    n_folds = N_FOLDS,
+    inner_folds = INNER_FOLDS,
+    strata_bins = STRATA_BINS,
+    tune_evals = TUNE_EVALS,
+    n_workers = N_WORKERS
+  )
+  write_config_snapshot(OUTPUT_DIR, resolved_config)
 
   log_info("Using data file: ", normalizePath(DATA_PATH, mustWork = FALSE))
   log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
-  log_info("Using features: ", paste(FEATURE_COLS, collapse = ", "))
-  log_info(
-    "Using outer folds / inner folds / tuning evals / workers: ",
-    N_FOLDS, " / ", INNER_FOLDS, " / ", TUNE_EVALS, " / ", N_WORKERS
+  log_dataset_overview(
+    work_dt,
+    target = TARGET,
+    feature_cols = setdiff(names(work_dt), TARGET),
+    id_cols = ID_COLS,
+    metric = "rmse",
+    extra = list(
+      "Original feature columns" = paste(FEATURE_COLS, collapse = ", "),
+      "Outer folds / inner folds" = paste(N_FOLDS, INNER_FOLDS, sep = " / "),
+      "Tuning evals" = TUNE_EVALS,
+      "Workers" = N_WORKERS
+    )
   )
+  overview_dt <- dataset_overview(work_dt, target = TARGET, feature_cols = setdiff(names(work_dt), TARGET), id_cols = ID_COLS)
+  safe_write_csv(overview_dt, file.path(OUTPUT_DIR, "xgb_dataset_overview.csv"))
 
   backend <- add_regression_stratum(as.data.frame(work_dt), target = TARGET, n_bins = STRATA_BINS)
   task <- make_regr_task("xgb_regression", backend = backend, target = TARGET)
@@ -178,6 +203,66 @@ with_run_finalizer({
   safe_write_csv(overall_metrics, file.path(OUTPUT_DIR, "xgb_overall_metrics.csv"))
   safe_write_csv(predictions, file.path(OUTPUT_DIR, "xgb_cv_predictions.csv"))
   safe_write_csv(best_params, file.path(OUTPUT_DIR, "xgb_best_params.csv"))
+
+  diagnostic_artifacts <- character(0)
+  diagnostic_fit <- tryCatch({
+    best_param_values <- extract_param_values_from_tuning(best_params, sort_measure = "regr.rmse")
+    final_learner <- learner$clone(deep = TRUE)
+    final_learner$param_set$values <- modifyList(final_learner$param_set$values, best_param_values)
+    final_learner$train(task)
+
+    importance_dt <- tryCatch(
+      data.table::as.data.table(xgboost::xgb.importance(model = final_learner$model, feature_names = task$feature_names)),
+      error = function(e) NULL
+    )
+    if (!is.null(importance_dt) && nrow(importance_dt) > 0) {
+      setnames(importance_dt, old = names(importance_dt), new = tolower(names(importance_dt)))
+      safe_write_csv(importance_dt, file.path(OUTPUT_DIR, "xgb_feature_importance.csv"))
+      diagnostic_artifacts <<- c(diagnostic_artifacts, "`xgb_feature_importance.csv` / `.rds`")
+    }
+    TRUE
+  }, error = function(e) {
+    log_info("Warning: xgboost diagnostic fit failed: ", conditionMessage(e))
+    FALSE
+  })
+
+  report_lines <- c(
+    sprintf("# %s Report", SCRIPT_NAME),
+    "",
+    "## Run",
+    sprintf("- data_path: `%s`", normalizePath(DATA_PATH, mustWork = FALSE)),
+    sprintf("- output_dir: `%s`", normalizePath(OUTPUT_DIR, mustWork = FALSE)),
+    sprintf("- target: `%s`", TARGET),
+    sprintf("- original_feature_cols: `%s`", paste(FEATURE_COLS, collapse = ", ")),
+    sprintf("- encoded_feature_count: `%s`", length(task$feature_names)),
+    sprintf("- seed: `%s`", SEED),
+    sprintf("- outer_folds: `%s`", N_FOLDS),
+    sprintf("- inner_folds: `%s`", INNER_FOLDS),
+    sprintf("- tune_evals: `%s`", TUNE_EVALS),
+    sprintf("- workers: `%s`", N_WORKERS),
+    "",
+    "## Dataset",
+    sprintf("- rows: `%s`", overview_dt$n_rows[[1]]),
+    sprintf("- cols: `%s`", overview_dt$n_cols[[1]]),
+    "",
+    "## Metrics",
+    sprintf("- rmse: `%.6f`", overall_metrics$rmse[[1]]),
+    sprintf("- mae: `%.6f`", overall_metrics$mae[[1]]),
+    sprintf("- r2: `%.6f`", overall_metrics$r2[[1]]),
+    sprintf("- poisson_deviance: `%.6f`", overall_metrics$poisson_deviance[[1]]),
+    "",
+    "## Outputs",
+    "- `xgb_fold_metrics.csv` / `.rds`",
+    "- `xgb_overall_metrics.csv` / `.rds`",
+    "- `xgb_cv_predictions.csv` / `.rds`",
+    "- `xgb_best_params.csv` / `.rds`",
+    "- `resolved_config.txt` / `.rds`",
+    "- `run_manifest.csv` / `.rds`"
+  )
+  if (length(diagnostic_artifacts) > 0) {
+    report_lines <- append(report_lines, diagnostic_artifacts)
+  }
+  write_text_file(file.path(OUTPUT_DIR, "xgb_model_report.md"), report_lines)
 
   log_info("Done. Files written to: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
   print(overall_metrics)
