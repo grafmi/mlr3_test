@@ -847,6 +847,7 @@ evaluate_candidates_parallel <- function(candidate_specs, work_dt, target, fold_
       "evaluate_formula_cv",
       "formula_label",
       "evaluate_candidate",
+      "poisson_deviance_score",
       "reg_metrics",
       "aggregate_predictions",
       "WORK_DT_PARALLEL",
