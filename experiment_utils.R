@@ -131,10 +131,25 @@ has_config_value <- function(config, path) {
   TRUE
 }
 
+config_value_or <- function(config, path, default = NULL) {
+  if (!has_config_value(config, path)) return(default)
+  config_value(config, path)
+}
+
 parse_csv_setting <- function(value) {
   if (is.null(value) || !nzchar(trimws(value))) return(character(0))
   out <- trimws(unlist(strsplit(value, ",", fixed = TRUE), use.names = FALSE))
   unique(out[nzchar(out)])
+}
+
+normalize_optional_string <- function(value) {
+  value <- trimws(as.character(value)[1])
+  if (is.na(value) || !nzchar(value)) return(NA_character_)
+  value
+}
+
+get_run_name_setting <- function(config) {
+  normalize_optional_string(get_setting("run-name", "RUN_NAME", config_value_or(config, c("results", "run_name"), "")))
 }
 
 get_bool_setting <- function(arg_name, env_name, default = FALSE) {
@@ -637,7 +652,8 @@ package_versions_string <- function(packages) {
 write_run_manifest <- function(output_dir, script_name, log_state, repo_dir,
                                packages = character(0), status = "completed",
                                seed = NA, data_path = NA_character_,
-                               feature_cols = character(0), n_workers = NA) {
+                               feature_cols = character(0), n_workers = NA,
+                               run_name = NA_character_) {
   started_at <- if (!is.null(log_state$started_at)) log_state$started_at else Sys.time()
   ended_at <- Sys.time()
   runtime_seconds <- as.numeric(difftime(ended_at, started_at, units = "secs"))
@@ -646,6 +662,7 @@ write_run_manifest <- function(output_dir, script_name, log_state, repo_dir,
 
   manifest <- data.table::data.table(
     script_name = script_name,
+    run_name = if (is.na(run_name)[1]) NA_character_ else as.character(run_name)[1],
     status = status,
     seed = if (length(seed) == 0) NA_real_ else as.numeric(seed)[1],
     data_path = if (is.na(data_path)[1]) NA_character_ else normalizePath(data_path, mustWork = FALSE),
@@ -818,7 +835,8 @@ manifest_status_summary <- function(output_dir, required_files = character(0)) {
 finalize_run <- function(log_state, output_dir, script_name, repo_dir,
                          packages = character(0), status = "completed",
                          seed = NA, data_path = NA_character_,
-                         feature_cols = character(0), n_workers = NA) {
+                         feature_cols = character(0), n_workers = NA,
+                         run_name = NA_character_) {
   manifest_error <- NULL
 
   tryCatch(
@@ -832,7 +850,8 @@ finalize_run <- function(log_state, output_dir, script_name, repo_dir,
       seed = seed,
       data_path = data_path,
       feature_cols = feature_cols,
-      n_workers = n_workers
+      n_workers = n_workers,
+      run_name = run_name
     )),
     error = function(e) {
       manifest_error <<- conditionMessage(e)

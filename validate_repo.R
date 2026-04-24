@@ -24,6 +24,7 @@ source_experiment_utils <- function() {
 UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
 CONFIG <- load_project_config(REPO_DIR)
+RUN_NAME <- get_run_name_setting(CONFIG)
 SCRIPT_NAME <- "validate_repo"
 SCRIPT_PACKAGES <- c("data.table")
 
@@ -74,6 +75,7 @@ validate_zero_formula_rhs <- function(rhs, dt) {
 .script_ok <- FALSE
 LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
 with_run_finalizer({
+  if (!is.na(RUN_NAME)) log_info("Run name: ", RUN_NAME)
   checks <- list()
 
   missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
@@ -158,5 +160,6 @@ with_run_finalizer({
   packages = SCRIPT_PACKAGES,
   status = if (.script_ok) "completed" else "failed",
   data_path = DATA_PATH,
-  feature_cols = FEATURE_COLS
+  feature_cols = FEATURE_COLS,
+  run_name = RUN_NAME
 ))

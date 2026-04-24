@@ -25,6 +25,7 @@ UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
 CONFIG <- load_project_config(REPO_DIR)
 CONFIG_PATH <- get_project_config_path(REPO_DIR)
+RUN_NAME <- get_run_name_setting(CONFIG)
 
 require_packages(c("data.table"))
 suppressPackageStartupMessages(library(data.table))
@@ -92,6 +93,7 @@ run_runtime <- if (has_run_start && has_run_end) as.numeric(difftime(run_end, ru
 
 summary_dt <- data.table(
   run_id = RUN_ID,
+  run_name = RUN_NAME,
   run_output_root = normalizePath(RUN_OUTPUT_ROOT, mustWork = FALSE),
   run_status = run_status,
   started_at = if (has_run_start) format(run_start, "%Y-%m-%d %H:%M:%S %Z") else NA_character_,
@@ -114,6 +116,7 @@ safe_write_csv(script_summary, file.path(OUTPUT_DIR, "run_summary_scripts.csv"))
 
 run_context_dt <- data.table(
   run_id = RUN_ID,
+  run_name = RUN_NAME,
   repo_dir = normalizePath(REPO_DIR, mustWork = FALSE),
   run_output_root = normalizePath(RUN_OUTPUT_ROOT, mustWork = FALSE),
   results_root_dir = RESULTS_ROOT_DIR,
@@ -133,6 +136,7 @@ report_lines <- c(
   "",
   "## Run",
   sprintf("- status: `%s`", summary_dt$run_status[[1]]),
+  sprintf("- run_name: `%s`", if (is.na(summary_dt$run_name[[1]])) "<none>" else summary_dt$run_name[[1]]),
   sprintf("- started_at: `%s`", summary_dt$started_at[[1]]),
   sprintf("- ended_at: `%s`", summary_dt$ended_at[[1]]),
   sprintf("- runtime_seconds: `%s`", summary_dt$runtime_seconds[[1]]),

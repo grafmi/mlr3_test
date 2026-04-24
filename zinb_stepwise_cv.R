@@ -24,6 +24,7 @@ source_experiment_utils <- function() {
 UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
 CONFIG <- load_project_config(REPO_DIR)
+RUN_NAME <- get_run_name_setting(CONFIG)
 SCRIPT_NAME <- "zinb_stepwise_cv"
 SCRIPT_PACKAGES <- c("data.table", "pscl", "splines", "parallel")
 
@@ -908,6 +909,7 @@ with_run_finalizer({
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
   resolved_config <- list(
     script_name = SCRIPT_NAME,
+    run_name = RUN_NAME,
     data_path = normalizePath(DATA_PATH, mustWork = FALSE),
     output_dir = normalizePath(OUTPUT_DIR, mustWork = FALSE),
     target = TARGET,
@@ -934,6 +936,7 @@ with_run_finalizer({
 
   log_info("Using data file: ", normalizePath(DATA_PATH, mustWork = FALSE))
   log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+  if (!is.na(RUN_NAME)) log_info("Run name: ", RUN_NAME)
   if (nzchar(trimws(ROW_FILTER))) log_info("Using row filter: ", ROW_FILTER)
   log_dataset_overview(
     work_dt,
@@ -1193,5 +1196,6 @@ with_run_finalizer({
   seed = SEED,
   data_path = DATA_PATH,
   feature_cols = FEATURE_COLS,
-  n_workers = N_WORKERS
+  n_workers = N_WORKERS,
+  run_name = RUN_NAME
 ))

@@ -24,6 +24,7 @@ source_experiment_utils <- function() {
 UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
 CONFIG <- load_project_config(REPO_DIR)
+RUN_NAME <- get_run_name_setting(CONFIG)
 SCRIPT_NAME <- "compare_best_models"
 SCRIPT_PACKAGES <- c("data.table")
 
@@ -94,6 +95,7 @@ rank_values <- function(values, metric) {
 LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
 with_run_finalizer({
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+  if (!is.na(RUN_NAME)) log_info("Run name: ", RUN_NAME)
   log_info("Using metric to rank: ", METRIC_TO_RANK)
   log_info("Using ranger directory: ", normalizePath(RANGER_DIR, mustWork = FALSE))
   log_info("Using xgb directory: ", normalizePath(XGB_DIR, mustWork = FALSE))
@@ -216,5 +218,6 @@ with_run_finalizer({
   script_name = SCRIPT_NAME,
   repo_dir = REPO_DIR,
   packages = SCRIPT_PACKAGES,
-  status = if (.script_ok) "completed" else "failed"
+  status = if (.script_ok) "completed" else "failed",
+  run_name = RUN_NAME
 ))

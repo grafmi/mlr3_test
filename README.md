@@ -129,6 +129,7 @@ The file is grouped so that the most important settings appear first:
 
 - `CONFIG$experiment`: data path, target, features, optional row filter, seed,
   folds, workers
+- `CONFIG$results`: optional run naming plus results-root behavior
 - `CONFIG$experiment$inner_folds`: folds used in the inner tuning loop for
   `ranger` and `xgboost`
 - `CONFIG$preprocess`: preprocessing defaults and factor handling
@@ -152,6 +153,13 @@ CONFIG$experiment$data_path <- "/absolute/path/to/my_dataset.csv"
 ```
 
 Absolute paths, repo-relative paths, and `~/...` paths are supported.
+
+If you want a human-readable label across manifests and run summaries, set
+`CONFIG$results$run_name`, for example:
+
+```r
+CONFIG$results$run_name <- "age-band-debug-run"
+```
 
 `CONFIG$experiment$id_cols` can be used for identifier columns that exist in the
 dataset but must not be used as predictors, for example customer IDs, policy

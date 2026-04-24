@@ -24,6 +24,7 @@ source_experiment_utils <- function() {
 UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
 CONFIG <- load_project_config(REPO_DIR)
+RUN_NAME <- get_run_name_setting(CONFIG)
 SCRIPT_NAME <- "preprocess_data"
 SCRIPT_PACKAGES <- c("data.table")
 
@@ -198,6 +199,7 @@ with_run_finalizer({
 
   log_info("Using input file: ", normalizePath(INPUT_PATH, mustWork = FALSE))
   log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+  if (!is.na(RUN_NAME)) log_info("Run name: ", RUN_NAME)
   log_info("Using output basename: ", OUTPUT_BASENAME)
   log_info("Using output formats: ", paste(OUTPUT_FORMATS, collapse = ", "))
   if (nzchar(trimws(ROW_FILTER))) log_info("Using row filter: ", ROW_FILTER)
@@ -276,5 +278,6 @@ with_run_finalizer({
   repo_dir = REPO_DIR,
   packages = SCRIPT_PACKAGES,
   status = if (.script_ok) "completed" else "failed",
-  data_path = INPUT_PATH
+  data_path = INPUT_PATH,
+  run_name = RUN_NAME
 ))

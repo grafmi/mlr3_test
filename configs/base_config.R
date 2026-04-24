@@ -31,6 +31,7 @@ CONFIG <- list(
   ),
 
   results = list(
+    run_name = "",
     root_dir = "results",
     version_runs = TRUE
   ),
