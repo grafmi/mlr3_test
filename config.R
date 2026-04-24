@@ -169,6 +169,11 @@ CONFIG <- list(
     # binned or class-coded numeric variables such as age classes.
     numeric_as_factor_max_levels = 12L,
 
+    # Optional explicit allowlist of numeric feature names that should also be
+    # evaluated as factor(var) candidates, even if they exceed the global
+    # numeric_as_factor_max_levels threshold.
+    numeric_as_factor_vars = character(0),
+
     # Formula right-hand side for the zero-inflation part. Use "1" for an
     # intercept-only zero part, or set an explicit formula such as
     # "prcrank + log1p(potenzielle_kunden)". The special value

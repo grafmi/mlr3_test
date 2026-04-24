@@ -457,6 +457,53 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
+# 10. zinb_stepwise_cv.R should allow explicit numeric-as-factor variable overrides
+zinb_factor_override_fixture_dir <- file.path(TEST_OUTPUT_DIR, "zinb_factor_override_fixture")
+unlink(zinb_factor_override_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(zinb_factor_override_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+zinb_factor_override_input <- file.path(zinb_factor_override_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = c(0, 1, 2, 0, 1, 3, 0, 2, 1, 4, 0, 3, 1, 2, 3, 0, 1, 2, 1, 3, 0, 2, 1, 4),
+    age_band_num = rep(c(1, 2, 3, 4, 5, 6), length.out = 24),
+    exposure = c(10, 12, 14, 11, 13, 15, 10, 12, 14, 11, 13, 15, 16, 18, 20, 17, 19, 21, 16, 18, 20, 17, 19, 21)
+  ),
+  zinb_factor_override_input
+)
+
+zinb_factor_override_out <- file.path(zinb_factor_override_fixture_dir, "outputs")
+zinb_factor_override_run <- run_script(
+  "zinb_stepwise_cv.R",
+  args = c(
+    sprintf("--data=%s", zinb_factor_override_input),
+    sprintf("--output-dir=%s", zinb_factor_override_out),
+    "--target=target",
+    "--features=age_band_num,exposure",
+    "--folds=2",
+    "--metric=rmse",
+    "--max-vars=1",
+    "--workers=1",
+    "--numeric-as-factor-max-levels=3",
+    "--numeric-as-factor-vars=age_band_num",
+    "--zero-formula=1"
+  )
+)
+zinb_override_candidates <- read_csv_if_exists(file.path(zinb_factor_override_out, "zinb_all_candidates_by_step.csv"))
+zinb_factor_override_ok <- zinb_factor_override_run$status == 0 &&
+  !is.null(zinb_override_candidates) &&
+  nrow(zinb_override_candidates[variable == "age_band_num" & transformation == "factor"]) >= 1
+
+tests[[length(tests) + 1L]] <- record_test(
+  "zinb_allows_explicit_numeric_factor_overrides",
+  zinb_factor_override_ok,
+  if (zinb_factor_override_ok) {
+    "zinb_stepwise_cv.R allows explicit numeric-as-factor variable overrides"
+  } else {
+    paste("zinb_stepwise_cv.R did not honor the numeric-as-factor variable override:", zinb_factor_override_run$output)
+  }
+)
+
 results <- rbindlist(tests, fill = TRUE)
 safe_write_csv(results, file.path(TEST_OUTPUT_DIR, "regression_test_results.csv"))
 

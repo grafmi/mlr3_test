@@ -177,7 +177,9 @@ before a longer CV run starts.
 For ZINB, numeric predictors can also be tested as categorical candidates via
 `factor(var)`. By default this is enabled only for numeric variables with at
 most `CONFIG$zinb$numeric_as_factor_max_levels` observed values, which works
-well for binned features such as age classes.
+well for binned features such as age classes. You can additionally force
+specific numeric variables into this check via
+`CONFIG$zinb$numeric_as_factor_vars`.
 
 For count-aware evaluation, the scripts now also report:
 
@@ -268,6 +270,7 @@ Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5
 Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
 Rscript zinb_stepwise_cv.R --metric=poisson_deviance --max-vars=3 --workers=4
 Rscript zinb_stepwise_cv.R --numeric-as-factor-max-levels=8
+Rscript zinb_stepwise_cv.R --numeric-as-factor-vars=age_band_num,tariff_class_num
 Rscript compare_best_models.R --metric=rmse
 ```
 
@@ -281,7 +284,8 @@ The same settings can be controlled with environment variables, for example
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
 `COMPARISON_OUTPUT_DIR`. ZINB also supports `ZINB_WORKERS`, which takes
 precedence over `N_WORKERS` for that script. Additional ZINB-specific overrides
-include `ZINB_ZERO_FORMULA` and `ZINB_NUMERIC_AS_FACTOR_MAX_LEVELS`.
+include `ZINB_ZERO_FORMULA`, `ZINB_NUMERIC_AS_FACTOR_MAX_LEVELS`, and
+`ZINB_NUMERIC_AS_FACTOR_VARS`.
 
 For reproducibility, the default worker count is `1`. Increase `--workers` for
 faster mlr3 runs and for parallel ZINB candidate evaluation on Linux.

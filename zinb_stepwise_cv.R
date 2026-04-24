@@ -73,6 +73,10 @@ NUMERIC_AS_FACTOR_MAX_LEVELS <- get_int_setting(
   config_value(CONFIG, c("zinb", "numeric_as_factor_max_levels")),
   min_value = 2
 )
+NUMERIC_AS_FACTOR_VARS <- parse_csv_setting(get_setting(
+  "numeric-as-factor-vars", "ZINB_NUMERIC_AS_FACTOR_VARS",
+  paste(config_value(CONFIG, c("zinb", "numeric_as_factor_vars")), collapse = ",")
+))
 ZERO_INFLATION_FORMULA <- trimws(get_setting(
   "zero-formula", "ZINB_ZERO_FORMULA",
   config_value(CONFIG, c("zinb", "zero_inflation_formula"))
@@ -93,12 +97,13 @@ is_nonnegative <- function(x) {
   is.numeric(x) && all(x[!is.na(x)] >= 0)
 }
 
-valid_transformations <- function(x) {
+valid_transformations <- function(x, var_name = NULL) {
   if (is.numeric(x)) {
     allowed <- c("raw", "ns2", "poly2")
     if (is_nonnegative(x)) allowed <- c(allowed, "sqrt", "log1p")
     n_unique <- data.table::uniqueN(x[!is.na(x)])
-    if (n_unique >= 2L && n_unique <= NUMERIC_AS_FACTOR_MAX_LEVELS) {
+    force_factor <- !is.null(var_name) && nzchar(var_name) && var_name %in% NUMERIC_AS_FACTOR_VARS
+    if (force_factor || (n_unique >= 2L && n_unique <= NUMERIC_AS_FACTOR_MAX_LEVELS)) {
       allowed <- c(allowed, "factor")
     }
     return(intersect(TRANSFORMATIONS_NUMERIC, allowed))
@@ -165,7 +170,7 @@ validate_zinb_setup <- function(dt, target, feature_cols, zero_formula_rhs) {
   }
 
   for (feature in feature_cols) {
-    tfms <- valid_transformations(dt[[feature]])
+    tfms <- valid_transformations(dt[[feature]], var_name = feature)
     if (length(tfms) == 0) {
       stop("Feature '", feature, "' has no valid ZINB transformation for its type or values.", call. = FALSE)
     }
@@ -449,7 +454,8 @@ with_run_finalizer({
     zero_inflation_formula = ZERO_INFLATION_FORMULA,
     transformations_numeric = TRANSFORMATIONS_NUMERIC,
     transformations_factor = TRANSFORMATIONS_FACTOR,
-    numeric_as_factor_max_levels = NUMERIC_AS_FACTOR_MAX_LEVELS
+    numeric_as_factor_max_levels = NUMERIC_AS_FACTOR_MAX_LEVELS,
+    numeric_as_factor_vars = NUMERIC_AS_FACTOR_VARS
   )
   write_config_snapshot(OUTPUT_DIR, resolved_config)
 
@@ -467,6 +473,7 @@ with_run_finalizer({
       "Workers" = N_WORKERS,
       "Row filter" = if (nzchar(trimws(ROW_FILTER))) ROW_FILTER else "<none>",
       "Numeric-as-factor max levels" = NUMERIC_AS_FACTOR_MAX_LEVELS,
+      "Numeric-as-factor vars" = if (length(NUMERIC_AS_FACTOR_VARS) > 0) paste(NUMERIC_AS_FACTOR_VARS, collapse = ", ") else "<none>",
       "Zero-inflation formula" = ZERO_INFLATION_FORMULA,
       "Max vars / min improvement" = paste(MAX_VARS, MIN_IMPROVEMENT, sep = " / ")
     )
@@ -510,7 +517,7 @@ with_run_finalizer({
     spec_idx <- 1L
 
     for (v in remaining) {
-      tfms <- valid_transformations(work_dt[[v]])
+      tfms <- valid_transformations(work_dt[[v]], var_name = v)
       if (length(tfms) == 0) {
         failure_log[[length(failure_log) + 1L]] <- data.table(
           step = step_i,
@@ -739,6 +746,7 @@ with_run_finalizer({
     sprintf("- folds: `%s`", N_FOLDS),
     sprintf("- workers: `%s`", N_WORKERS),
     sprintf("- numeric_as_factor_max_levels: `%s`", NUMERIC_AS_FACTOR_MAX_LEVELS),
+    sprintf("- numeric_as_factor_vars: `%s`", if (length(NUMERIC_AS_FACTOR_VARS) > 0) paste(NUMERIC_AS_FACTOR_VARS, collapse = ", ") else "<none>"),
     sprintf("- optimization_metric: `%s`", METRIC_TO_OPTIMIZE),
     sprintf("- stop_reason: `%s`", stop_reason),
     "",
