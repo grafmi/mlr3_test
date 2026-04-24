@@ -71,7 +71,11 @@ ZINB_VERBOSITY <- trimws(tolower(get_setting(
 )))
 PARALLEL_BACKEND <- trimws(tolower(get_setting(
   "parallel-backend", "ZINB_PARALLEL_BACKEND",
-  if (.Platform$OS.type == "unix") "fork" else "psock"
+  config_value_or(
+    CONFIG,
+    c("zinb", "parallel_backend"),
+    if (.Platform$OS.type == "unix") "fork" else "psock"
+  )
 )))
 N_WORKERS <- get_int_setting(
   "workers", "ZINB_WORKERS",

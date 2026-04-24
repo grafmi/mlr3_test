@@ -166,6 +166,12 @@ CONFIG <- list(
     # output to the main high-level milestones.
     verbosity = "batch",
 
+    # Parallel backend for ZINB candidate evaluation.
+    # "fork" is fast on many Linux setups but can behave poorly in some
+    # environments. "psock" is usually more isolated and is worth testing
+    # when forked workers appear to hang. "sequential" disables parallelism.
+    parallel_backend = "fork",
+
     # Allowed transformations for numeric predictors during forward selection.
     transformations_numeric = c("raw", "sqrt", "log1p", "ns2", "poly2", "factor"),
 

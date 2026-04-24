@@ -136,7 +136,7 @@ The file is grouped so that the most important settings appear first:
 - `CONFIG$ranger`: ranger output directory and tuning defaults
 - `CONFIG$xgboost`: xgboost output directory and tuning defaults
 - `CONFIG$zinb`: ZINB output directory, metric, transformations, workers,
-  numeric-as-factor controls, and zero-inflation formula
+  parallel backend, numeric-as-factor controls, and zero-inflation formula
 - `CONFIG$comparison`: model-comparison defaults
 
 The scripts use this precedence order:
@@ -307,6 +307,14 @@ precedence over `N_WORKERS` for that script. Additional ZINB-specific overrides
 include `ZINB_ZERO_FORMULA`, `ZINB_NUMERIC_AS_FACTOR_MAX_LEVELS`,
 `ZINB_NUMERIC_AS_FACTOR_VARS`, `ZINB_PARALLEL_BACKEND`, and
 `ZINB_VERBOSITY`.
+
+For ZINB parallelization, you can choose:
+
+- `parallel_backend = "fork"` for the current Linux fork-based worker path
+- `parallel_backend = "psock"` to test socket-based workers when forked runs
+  appear to stall or behave differently across environments
+- `parallel_backend = "sequential"` to disable ZINB parallelism completely for
+  debugging or stability checks
 
 For reproducibility, the default worker count is `1`. Increase `--workers` for
 faster mlr3 runs and for parallel ZINB candidate evaluation on Linux.
