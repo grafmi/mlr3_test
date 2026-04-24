@@ -556,6 +556,17 @@ predictions_from_resample <- function(rr) {
   }))
 }
 
+prediction_dt_from_prediction <- function(pred, fold) {
+  data.table::data.table(
+    row_id = pred$row_ids,
+    fold = fold,
+    truth = pred$truth,
+    response = pred$response,
+    error = pred$response - pred$truth,
+    abs_error = abs(pred$response - pred$truth)
+  )
+}
+
 fold_metrics_from_predictions <- function(predictions) {
   predictions[, reg_metrics(
     truth,
@@ -618,6 +629,82 @@ collect_tuning_results <- function(rr, measure_col = "regr.rmse") {
   out <- data.table::rbindlist(rows, fill = TRUE)
   if (nrow(out) > 0) data.table::setcolorder(out, c("outer_fold", setdiff(names(out), "outer_fold")))
   out
+}
+
+collect_tuning_result_from_learner <- function(learner, outer_fold, measure_col = "regr.rmse") {
+  tr <- data.table::as.data.table(learner$tuning_result)
+
+  if ((nrow(tr) == 0 || ncol(tr) == 0) && !is.null(learner$archive)) {
+    archive_dt <- data.table::as.data.table(learner$archive$data)
+    if (nrow(archive_dt) > 0 && measure_col %in% names(archive_dt)) {
+      tr <- archive_dt[which.min(archive_dt[[measure_col]])]
+    }
+  }
+
+  if (nrow(tr) == 0) return(NULL)
+  list_cols <- names(which(vapply(tr, is.list, logical(1))))
+  for (col in list_cols) {
+    tr[, (col) := vapply(.SD[[col]], function(x) paste(as.character(x), collapse = ","), character(1))]
+  }
+  tr[, outer_fold := outer_fold]
+  tr
+}
+
+run_autotuner_outer_cv <- function(task, auto_tuner, outer_cv, seed,
+                                   progress_prefix = NULL,
+                                   measure_col = "regr.rmse") {
+  n_folds <- outer_cv$iters
+  prediction_rows <- vector("list", n_folds)
+  tuning_rows <- vector("list", n_folds)
+  fitted_learners <- vector("list", n_folds)
+
+  log_progress <- function(...) {
+    if (!is.null(progress_prefix) && nzchar(progress_prefix)) {
+      log_info(progress_prefix, ": ", ...)
+    } else {
+      log_info(...)
+    }
+  }
+
+  log_progress("starting outer CV across ", n_folds, " fold(s)")
+  for (fold in seq_len(n_folds)) {
+    fold_started_at <- Sys.time()
+    train_ids <- outer_cv$train_set(fold)
+    test_ids <- outer_cv$test_set(fold)
+    log_progress(
+      "outer fold ", fold, "/", n_folds,
+      ": train rows=", length(train_ids),
+      ", test rows=", length(test_ids)
+    )
+
+    at_fold <- auto_tuner$clone(deep = TRUE)
+    set.seed(as.integer(seed) + fold - 1L)
+    at_fold$train(task, row_ids = train_ids)
+    pred <- at_fold$predict(task, row_ids = test_ids)
+
+    prediction_rows[[fold]] <- prediction_dt_from_prediction(pred, fold = fold)
+    tuning_rows[[fold]] <- collect_tuning_result_from_learner(at_fold, outer_fold = fold, measure_col = measure_col)
+    fitted_learners[[fold]] <- at_fold
+
+    log_progress(
+      "outer fold ", fold, "/", n_folds,
+      " finished in ",
+      format(round(as.numeric(difftime(Sys.time(), fold_started_at, units = "secs")), 2), nsmall = 2),
+      "s"
+    )
+  }
+
+  predictions <- data.table::rbindlist(prediction_rows, fill = TRUE)
+  tuning_results <- data.table::rbindlist(tuning_rows, fill = TRUE)
+  if (nrow(tuning_results) > 0) {
+    data.table::setcolorder(tuning_results, c("outer_fold", setdiff(names(tuning_results), "outer_fold")))
+  }
+
+  list(
+    predictions = predictions,
+    tuning_results = tuning_results,
+    learners = fitted_learners
+  )
 }
 
 safe_write_csv <- function(dt, path) {

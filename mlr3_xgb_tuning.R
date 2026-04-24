@@ -199,11 +199,17 @@ with_run_finalizer({
     store_models = FALSE
   )
 
-  rr <- resample(task, at, outer_cv$clone(deep = TRUE), store_models = TRUE)
-  predictions <- predictions_from_resample(rr)
+  cv_run <- run_autotuner_outer_cv(
+    task = task,
+    auto_tuner = at,
+    outer_cv = outer_cv$clone(deep = TRUE),
+    seed = SEED,
+    progress_prefix = "XGBoost"
+  )
+  predictions <- cv_run$predictions
   fold_metrics <- fold_metrics_from_predictions(predictions)
   overall_metrics <- aggregate_predictions(predictions)
-  best_params <- collect_tuning_results(rr, measure_col = "regr.rmse")
+  best_params <- cv_run$tuning_results
 
   safe_write_csv(fold_metrics, file.path(OUTPUT_DIR, "xgb_fold_metrics.csv"))
   safe_write_csv(overall_metrics, file.path(OUTPUT_DIR, "xgb_overall_metrics.csv"))
