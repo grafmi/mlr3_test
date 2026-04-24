@@ -874,7 +874,13 @@ with_run_finalizer <- function(code, finalizer) {
 
   runner <- function() {
     on.exit(finalizer(), add = TRUE)
-    eval(expr, envir = eval_env)
+    tryCatch(
+      eval(expr, envir = eval_env),
+      error = function(e) {
+        log_info("Error: ", conditionMessage(e))
+        stop(e)
+      }
+    )
   }
 
   runner()
