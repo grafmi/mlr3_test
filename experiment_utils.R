@@ -48,6 +48,23 @@ get_int_setting <- function(arg_name, env_name, default, min_value = NULL) {
   value
 }
 
+get_optional_int_setting <- function(arg_name, env_name, default = NA_integer_, min_value = NULL) {
+  raw_value <- get_setting(arg_name, env_name, default)
+  raw_value_chr <- trimws(as.character(raw_value))
+  if (is.na(raw_value_chr) || !nzchar(raw_value_chr) || tolower(raw_value_chr) %in% c("na", "null", "none")) {
+    return(NA_integer_)
+  }
+
+  value <- suppressWarnings(as.integer(raw_value_chr))
+  if (is.na(value)) {
+    stop(sprintf("Setting '%s' must be an integer or NA.", arg_name), call. = FALSE)
+  }
+  if (!is.null(min_value) && value < min_value) {
+    stop(sprintf("Setting '%s' must be at least %s when provided.", arg_name, min_value), call. = FALSE)
+  }
+  value
+}
+
 get_numeric_setting <- function(arg_name, env_name, default, min_value = NULL) {
   value <- suppressWarnings(as.numeric(get_setting(arg_name, env_name, default)))
   if (is.na(value)) {
@@ -883,6 +900,8 @@ build_dataset_metadata <- function(original_dt, processed_dt, source_path,
                                    filter_expression = "", rows_removed_by_filter = 0L,
                                    keep_cols = character(0), drop_cols = character(0),
                                    drop_missing_rows = FALSE, rows_removed_by_na_omit = 0L,
+                                   sample_rows = NA_integer_, sample_seed = NA_integer_,
+                                   rows_removed_by_subsampling = 0L,
                                    output_files = NULL) {
   source_path <- normalizePath(source_path, mustWork = FALSE)
 
@@ -896,10 +915,13 @@ build_dataset_metadata <- function(original_dt, processed_dt, source_path,
     rows_removed = nrow(original_dt) - nrow(processed_dt),
     rows_removed_by_filter = as.integer(rows_removed_by_filter),
     rows_removed_by_na_omit = as.integer(rows_removed_by_na_omit),
+    rows_removed_by_subsampling = as.integer(rows_removed_by_subsampling),
     filter_expression = if (nzchar(filter_expression)) filter_expression else NA_character_,
     keep_cols = if (length(keep_cols) > 0) paste(keep_cols, collapse = ", ") else NA_character_,
     drop_cols = if (length(drop_cols) > 0) paste(drop_cols, collapse = ", ") else NA_character_,
-    drop_missing_rows = drop_missing_rows
+    drop_missing_rows = drop_missing_rows,
+    sample_rows = if (is.na(sample_rows)) NA_integer_ else as.integer(sample_rows),
+    sample_seed = if (is.na(sample_seed)) NA_integer_ else as.integer(sample_seed)
   )
 
   column_metadata <- data.table::rbindlist(lapply(names(processed_dt), function(col) {

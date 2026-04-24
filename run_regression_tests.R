@@ -263,7 +263,62 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 6. validate_repo.R should allow modeling row filters on non-feature columns
+# 6. preprocess_data.R should support reproducible random subsampling
+preprocess_sample_fixture_dir <- file.path(TEST_OUTPUT_DIR, "preprocess_sample_fixture")
+unlink(preprocess_sample_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(preprocess_sample_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+preprocess_sample_input <- file.path(preprocess_sample_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    id = 1:6,
+    x = seq(10, 60, by = 10),
+    y = letters[1:6]
+  ),
+  preprocess_sample_input
+)
+
+preprocess_sample_out <- file.path(preprocess_sample_fixture_dir, "outputs")
+preprocess_sample_run <- run_script(
+  "preprocess_data.R",
+  args = c(
+    sprintf("--input=%s", preprocess_sample_input),
+    sprintf("--output-dir=%s", preprocess_sample_out),
+    "--sample-rows=3",
+    "--sample-seed=7"
+  )
+)
+preprocess_sample_dt <- read_csv_if_exists(file.path(preprocess_sample_out, "preprocessed_dataset.csv"))
+preprocess_sample_summary <- read_csv_if_exists(file.path(preprocess_sample_out, "preprocessed_dataset_metadata_summary.csv"))
+preprocess_sample_log_path <- file.path(preprocess_sample_out, "preprocess_data.log")
+preprocess_sample_log <- if (file.exists(preprocess_sample_log_path)) {
+  paste(readLines(preprocess_sample_log_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+
+preprocess_sample_ok <- preprocess_sample_run$status == 0 &&
+  !is.null(preprocess_sample_dt) &&
+  !is.null(preprocess_sample_summary) &&
+  nrow(preprocess_sample_dt) == 3 &&
+  identical(as.integer(preprocess_sample_dt$id), c(2L, 3L, 5L)) &&
+  identical(as.integer(preprocess_sample_summary$sample_rows[[1]]), 3L) &&
+  identical(as.integer(preprocess_sample_summary$sample_seed[[1]]), 7L) &&
+  identical(as.integer(preprocess_sample_summary$rows_removed_by_subsampling[[1]]), 3L) &&
+  grepl("Using random subset rows: 3", preprocess_sample_log) &&
+  grepl("Dropped 3 row\\(s\\) via random subsampling during preprocessing\\.", preprocess_sample_log)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "preprocess_supports_random_subsampling",
+  preprocess_sample_ok,
+  if (preprocess_sample_ok) {
+    "preprocess_data.R supports reproducible random subsampling"
+  } else {
+    paste("preprocess_data.R did not produce the expected random subset outputs:", preprocess_sample_run$output)
+  }
+)
+
+# 7. validate_repo.R should allow modeling row filters on non-feature columns
 row_filter_fixture_dir <- file.path(TEST_OUTPUT_DIR, "row_filter_fixture")
 unlink(row_filter_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(row_filter_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -312,7 +367,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 7. validate_repo.R should allow ZINB zero-formula columns outside FEATURE_COLS
+# 8. validate_repo.R should allow ZINB zero-formula columns outside FEATURE_COLS
 zero_formula_fixture_dir <- file.path(TEST_OUTPUT_DIR, "zero_formula_fixture")
 unlink(zero_formula_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(zero_formula_fixture_dir, recursive = TRUE, showWarnings = FALSE)

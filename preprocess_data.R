@@ -64,6 +64,15 @@ DROP_MISSING_ROWS <- get_bool_setting(
   "drop-missing-rows", "PREPROCESS_DROP_MISSING_ROWS",
   config_value(CONFIG, c("preprocess", "drop_missing_rows"))
 )
+SAMPLE_ROWS <- get_optional_int_setting(
+  "sample-rows", "PREPROCESS_SAMPLE_ROWS",
+  config_value(CONFIG, c("preprocess", "sample_rows")),
+  min_value = 1
+)
+SAMPLE_SEED <- get_int_setting(
+  "sample-seed", "PREPROCESS_SAMPLE_SEED",
+  config_value(CONFIG, c("preprocess", "sample_seed"))
+)
 CHARS_TO_FACTORS <- get_bool_setting(
   "chars-to-factors", "PREPROCESS_CHARS_TO_FACTORS",
   config_value(CONFIG, c("preprocess", "chars_to_factors"))
@@ -134,6 +143,29 @@ drop_missing_rows_if_requested <- function(dt, drop_missing_rows) {
   list(data = cleaned, rows_dropped = rows_before - nrow(cleaned))
 }
 
+apply_random_subset_if_requested <- function(dt, sample_rows, sample_seed) {
+  if (is.na(sample_rows)) {
+    return(list(data = data.table::copy(dt), rows_removed = 0L))
+  }
+
+  if (sample_rows > nrow(dt)) {
+    stop(
+      "sample-rows (", sample_rows, ") exceeds the number of rows remaining after preprocessing steps (",
+      nrow(dt), ").",
+      call. = FALSE
+    )
+  }
+
+  if (sample_rows == nrow(dt)) {
+    return(list(data = data.table::copy(dt), rows_removed = 0L))
+  }
+
+  set.seed(sample_seed)
+  selected_rows <- sort(sample.int(nrow(dt), size = sample_rows, replace = FALSE))
+  subset_dt <- dt[selected_rows]
+  list(data = subset_dt, rows_removed = nrow(dt) - nrow(subset_dt))
+}
+
 metadata_output_table <- function(dataset_files, metadata_prefix) {
   rows <- rbindlist(list(
     data.table(file_role = "dataset", dataset_files),
@@ -172,6 +204,10 @@ with_run_finalizer({
   if (length(KEEP_COLS) > 0) log_info("Keeping columns: ", paste(KEEP_COLS, collapse = ", "))
   if (length(DROP_COLS) > 0) log_info("Dropping columns: ", paste(DROP_COLS, collapse = ", "))
   log_info("Drop rows with missing values: ", DROP_MISSING_ROWS)
+  if (!is.na(SAMPLE_ROWS)) {
+    log_info("Using random subset rows: ", SAMPLE_ROWS)
+    log_info("Using random subset seed: ", SAMPLE_SEED)
+  }
   log_info("Convert character columns to factors: ", CHARS_TO_FACTORS)
   log_info("Minimum count for rare factor level warning: ", FACTOR_MIN_COUNT)
 
@@ -186,6 +222,8 @@ with_run_finalizer({
   }
   drop_result <- drop_missing_rows_if_requested(processed_dt, DROP_MISSING_ROWS)
   processed_dt <- drop_result$data
+  subset_result <- apply_random_subset_if_requested(processed_dt, SAMPLE_ROWS, SAMPLE_SEED)
+  processed_dt <- subset_result$data
   processed_dt <- drop_unused_factor_levels(processed_dt)
 
   if (nrow(processed_dt) == 0) {
@@ -197,6 +235,9 @@ with_run_finalizer({
   }
   if (drop_result$rows_dropped > 0) {
     log_info("Dropped ", drop_result$rows_dropped, " row(s) with missing values during preprocessing.")
+  }
+  if (subset_result$rows_removed > 0) {
+    log_info("Dropped ", subset_result$rows_removed, " row(s) via random subsampling during preprocessing.")
   }
 
   validate_factor_columns(processed_dt, min_level_count = FACTOR_MIN_COUNT, context = "preprocessed data")
@@ -215,6 +256,9 @@ with_run_finalizer({
     drop_cols = DROP_COLS,
     drop_missing_rows = DROP_MISSING_ROWS,
     rows_removed_by_na_omit = drop_result$rows_dropped,
+    sample_rows = SAMPLE_ROWS,
+    sample_seed = SAMPLE_SEED,
+    rows_removed_by_subsampling = subset_result$rows_removed,
     output_files = output_files
   )
   write_metadata_bundle(metadata, OUTPUT_DIR, prefix = metadata_prefix)

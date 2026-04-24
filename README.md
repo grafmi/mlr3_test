@@ -256,6 +256,7 @@ Common command-line overrides:
 ```sh
 Rscript preprocess_data.R --input=/path/to/data.rds --formats=csv,rds --filter="n_eintritte >= 0"
 Rscript preprocess_data.R --keep-cols=n_eintritte,prcrank --drop-missing-rows=true
+Rscript preprocess_data.R --sample-rows=500 --sample-seed=123
 Rscript preprocess_data.R --chars-to-factors=true --factor-min-count=5
 Rscript mlr3_ranger_tuning.R --row-filter="split == 'train'" --features=prcrank,potenzielle_kunden
 Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5 --tune-evals=20 --workers=4
@@ -268,6 +269,7 @@ The same settings can be controlled with environment variables, for example
 `INPUT_DATA_PATH`, `PREPROCESS_OUTPUT_DIR`, `PREPROCESS_OUTPUT_NAME`,
 `PREPROCESS_OUTPUT_FORMATS`, `PREPROCESS_FILTER`, `PREPROCESS_KEEP_COLS`,
 `PREPROCESS_DROP_COLS`, `PREPROCESS_DROP_MISSING_ROWS`,
+`PREPROCESS_SAMPLE_ROWS`, `PREPROCESS_SAMPLE_SEED`,
 `PREPROCESS_CHARS_TO_FACTORS`, `PREPROCESS_FACTOR_MIN_COUNT`,
 `MLR3_DATA_PATH`, `ROW_FILTER`, `N_FOLDS`, `INNER_FOLDS`, `TUNE_EVALS`, `N_WORKERS`,
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
@@ -441,7 +443,8 @@ outputs_preprocessed/preprocess_data.log
 ```
 
 The preprocessing summary metadata includes separate row-removal counts for
-the row filter and for `na.omit()`-based missing-value removal.
+the row filter, `na.omit()`-based missing-value removal, and optional random
+subsampling.
 
 Factor handling policy:
 

@@ -59,6 +59,13 @@ CONFIG <- list(
     # selection.
     drop_missing_rows = FALSE,
 
+    # Optional random subset size applied after filtering and missing-value
+    # removal. Leave as NA to keep all remaining rows.
+    sample_rows = NA_integer_,
+
+    # Random seed used for preprocess subsampling when sample_rows is set.
+    sample_seed = 123L,
+
     # If TRUE, convert character columns to factors before saving.
     chars_to_factors = TRUE,
 
