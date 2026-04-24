@@ -103,10 +103,18 @@ with_run_finalizer({
 
   dataset_check <- tryCatch({
     df <- load_tabular_data_checked(DATA_PATH)
+    zero_formula <- trimws(get_setting(
+      "zero-formula", "ZINB_ZERO_FORMULA",
+      config_value(CONFIG, c("zinb", "zero_inflation_formula"))
+    ))
+    zero_formula_cols <- if (identical(zero_formula, "same_as_count")) character(0) else {
+      formula_referenced_columns(zero_formula, label = "ZINB zero-formula")
+    }
     work_dt <- prepare_modeling_data(
       df, TARGET, FEATURE_COLS, ID_COLS,
       require_count_target = FALSE,
-      row_filter = ROW_FILTER
+      row_filter = ROW_FILTER,
+      extra_feature_cols = zero_formula_cols
     )
 
     checks_local <- list(
@@ -114,7 +122,6 @@ with_run_finalizer({
       record_check("target_and_features_present", TRUE, paste(c(TARGET, FEATURE_COLS), collapse = ", "))
     )
 
-    zero_formula <- trimws(config_value(CONFIG, c("zinb", "zero_inflation_formula")))
     if (!identical(zero_formula, "same_as_count")) {
       validate_zero_formula_rhs(zero_formula, work_dt)
     }

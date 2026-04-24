@@ -307,6 +307,20 @@ validate_columns <- function(df, target, feature_cols, id_cols = character(0)) {
   }
 }
 
+formula_referenced_columns <- function(rhs, label = "Formula") {
+  rhs <- trimws(rhs)
+  if (!nzchar(rhs)) return(character(0))
+
+  rhs_formula <- tryCatch(
+    stats::as.formula(sprintf("~ %s", rhs)),
+    error = function(e) {
+      stop(label, " is not a valid formula right-hand side: ", conditionMessage(e), call. = FALSE)
+    }
+  )
+
+  all.vars(rhs_formula)
+}
+
 apply_row_filter_checked <- function(dt, filter_expression, label = "Row filter") {
   if (!nzchar(trimws(filter_expression))) {
     return(list(data = data.table::copy(dt), rows_removed = 0L))
@@ -350,8 +364,14 @@ apply_row_filter_checked <- function(dt, filter_expression, label = "Row filter"
 }
 
 prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(0),
-                                  require_count_target = FALSE, row_filter = "") {
+                                  require_count_target = FALSE, row_filter = "",
+                                  extra_feature_cols = character(0)) {
   validate_columns(df, target, feature_cols, id_cols)
+  extra_feature_cols <- unique(extra_feature_cols[nzchar(extra_feature_cols)])
+  missing_extra <- setdiff(extra_feature_cols, names(df))
+  if (length(missing_extra) > 0) {
+    stop("Additional modeling columns not found in data: ", paste(missing_extra, collapse = ", "), call. = FALSE)
+  }
 
   dt <- data.table::as.data.table(data.table::copy(df))
   filter_result <- apply_row_filter_checked(dt, row_filter, label = "Modeling row filter")
@@ -360,7 +380,7 @@ prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(
     message(sprintf("Dropped %s row(s) via modeling row filter.", filter_result$rows_removed))
   }
 
-  keep_cols <- setdiff(c(target, feature_cols), id_cols)
+  keep_cols <- setdiff(c(target, feature_cols, extra_feature_cols), id_cols)
   dt <- dt[, ..keep_cols]
 
   if (!is.numeric(dt[[target]])) {

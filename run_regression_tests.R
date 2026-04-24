@@ -312,6 +312,50 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
+# 7. validate_repo.R should allow ZINB zero-formula columns outside FEATURE_COLS
+zero_formula_fixture_dir <- file.path(TEST_OUTPUT_DIR, "zero_formula_fixture")
+unlink(zero_formula_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(zero_formula_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+zero_formula_input <- file.path(zero_formula_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = c(1, 2, 3, 4),
+    feature_a = c(10, 20, 30, 40),
+    keep_group = c(1, 0, 1, 0)
+  ),
+  zero_formula_input
+)
+
+zero_formula_out <- file.path(zero_formula_fixture_dir, "outputs")
+zero_formula_run <- run_script(
+  "validate_repo.R",
+  args = c(
+    sprintf("--data=%s", zero_formula_input),
+    sprintf("--output-dir=%s", zero_formula_out),
+    "--target=target",
+    "--features=feature_a"
+  ),
+  env = c(
+    "ROW_FILTER=keep_group==1",
+    "ZINB_ZERO_FORMULA=keep_group"
+  )
+)
+zero_formula_checks <- read_csv_if_exists(file.path(zero_formula_out, "validation_checks.csv"))
+zero_formula_ok <- zero_formula_run$status == 0 &&
+  !is.null(zero_formula_checks) &&
+  nrow(zero_formula_checks[check == "zinb_zero_formula_valid" & ok == TRUE]) == 1
+
+tests[[length(tests) + 1L]] <- record_test(
+  "validate_repo_allows_zero_formula_on_non_feature_columns",
+  zero_formula_ok,
+  if (zero_formula_ok) {
+    "validate_repo.R accepts ZINB zero-formula columns outside FEATURE_COLS"
+  } else {
+    paste("validate_repo.R did not allow a non-feature zero-formula column:", zero_formula_run$output)
+  }
+)
+
 results <- rbindlist(tests, fill = TRUE)
 safe_write_csv(results, file.path(TEST_OUTPUT_DIR, "regression_test_results.csv"))
 

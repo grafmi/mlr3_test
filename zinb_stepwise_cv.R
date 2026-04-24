@@ -131,14 +131,8 @@ validate_formula_rhs_on_data <- function(rhs, dt, label) {
     stop(label, " must not be empty.", call. = FALSE)
   }
 
-  rhs_formula <- tryCatch(
-    as.formula(sprintf("~ %s", rhs)),
-    error = function(e) {
-      stop(label, " is not a valid formula right-hand side: ", conditionMessage(e), call. = FALSE)
-    }
-  )
-
-  referenced_vars <- all.vars(rhs_formula)
+  rhs_formula <- as.formula(sprintf("~ %s", rhs))
+  referenced_vars <- formula_referenced_columns(rhs, label = label)
   missing_vars <- setdiff(referenced_vars, names(dt))
   if (length(missing_vars) > 0) {
     stop(label, " references columns that are not present in the data: ",
@@ -417,10 +411,14 @@ LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
 with_run_finalizer({
   set.seed(SEED)
   df <- load_csv_checked(DATA_PATH)
+  zero_formula_cols <- if (identical(ZERO_INFLATION_FORMULA, "same_as_count")) character(0) else {
+    formula_referenced_columns(ZERO_INFLATION_FORMULA, label = "ZINB zero-formula")
+  }
   work_dt <- prepare_modeling_data(
     df, TARGET, FEATURE_COLS, ID_COLS,
     require_count_target = TRUE,
-    row_filter = ROW_FILTER
+    row_filter = ROW_FILTER,
+    extra_feature_cols = zero_formula_cols
   )
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
   resolved_config <- list(
