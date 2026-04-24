@@ -398,7 +398,7 @@ prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(
   filter_result <- apply_row_filter_checked(dt, row_filter, label = "Modeling row filter")
   dt <- filter_result$data
   if (filter_result$rows_removed > 0) {
-    message(sprintf("Dropped %s row(s) via modeling row filter.", filter_result$rows_removed))
+    log_info("Dropped ", filter_result$rows_removed, " row(s) via modeling row filter.")
   }
 
   keep_cols <- setdiff(c(target, feature_cols, extra_feature_cols), id_cols)
@@ -423,7 +423,7 @@ prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(
   dt <- stats::na.omit(dt)
   rows_dropped <- rows_before - nrow(dt)
   if (rows_dropped > 0) {
-    message(sprintf("Dropped %s row(s) with missing values.", rows_dropped))
+    log_info("Dropped ", rows_dropped, " row(s) with missing values.")
   }
   if (nrow(dt) == 0) stop("No rows remain after removing missing values.", call. = FALSE)
 
@@ -973,7 +973,7 @@ timestamp <- function() {
 }
 
 .project_logging_state <- new.env(parent = emptyenv())
-.project_logging_state$connection <- NULL
+.project_logging_state$path <- NULL
 
 detect_cpu_cores <- function(logical = TRUE) {
   cores <- tryCatch(
@@ -1003,10 +1003,11 @@ cpu_core_summary <- function() {
 }
 
 log_info <- function(...) {
-  cat(sprintf("[%s] ", timestamp()), ..., "\n", sep = "")
-  log_con <- .project_logging_state$connection
-  if (!is.null(log_con) && isOpen(log_con)) {
-    try(flush(log_con), silent = TRUE)
+  line <- paste0("[", timestamp(), "] ", paste0(..., collapse = ""))
+  cat(line, "\n", sep = "")
+  log_path <- .project_logging_state$path
+  if (!is.null(log_path) && nzchar(log_path)) {
+    try(write(line, file = log_path, append = TRUE), silent = TRUE)
   }
   flush.console()
 }
@@ -1014,12 +1015,9 @@ log_info <- function(...) {
 start_logging <- function(output_dir, script_name) {
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   log_path <- file.path(output_dir, sprintf("%s.log", script_name))
-  log_con <- file(log_path, open = "wt")
   started_at <- Sys.time()
-
-  sink(log_con, split = TRUE)
-  sink(log_con, type = "message")
-  .project_logging_state$connection <- log_con
+  writeLines(character(0), con = log_path, useBytes = TRUE)
+  .project_logging_state$path <- log_path
 
   log_info("Started ", script_name)
   log_info("Log file: ", normalizePath(log_path, mustWork = FALSE))
@@ -1027,7 +1025,7 @@ start_logging <- function(output_dir, script_name) {
   log_info("Detected CPU cores: ", cpu_core_summary())
   log_info("Command: ", paste(commandArgs(), collapse = " "))
 
-  list(path = log_path, connection = log_con, started_at = started_at, script_name = script_name)
+  list(path = log_path, started_at = started_at, script_name = script_name)
 }
 
 stop_logging <- function(log_state, status = "completed") {
@@ -1035,12 +1033,7 @@ stop_logging <- function(log_state, status = "completed") {
   if (isTRUE(log_state$closed)) return(invisible(NULL))
 
   log_info("Finished with status: ", status)
-  if (sink.number(type = "message") > 0) sink(type = "message")
-  if (sink.number() > 0) sink()
-  if (!is.null(log_state$connection) && isOpen(log_state$connection)) {
-    close(log_state$connection)
-  }
-  .project_logging_state$connection <- NULL
+  .project_logging_state$path <- NULL
   log_state$closed <- TRUE
   invisible(NULL)
 }
