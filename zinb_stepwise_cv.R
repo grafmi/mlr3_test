@@ -214,7 +214,6 @@ zinb_progress_info <- function(prefix = NULL, ...) {
 zinb_fit_attempts <- function() {
   list(
     list(label = "em100", EM = TRUE, maxit = 100L),
-    list(label = "noem200", EM = FALSE, maxit = 200L),
     list(label = "em300", EM = TRUE, maxit = 300L)
   )
 }
