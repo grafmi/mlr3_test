@@ -29,7 +29,9 @@ get_arg_value <- function(name, default = NULL) {
 
 get_setting <- function(arg_name, env_name, default) {
   arg_value <- get_arg_value(arg_name, default = NULL)
-  if (!is.null(arg_value) && nzchar(arg_value)) return(arg_value)
+  # An explicit CLI argument should override config defaults even when it is
+  # intentionally set to the empty string (for example `--row-filter=`).
+  if (!is.null(arg_value)) return(arg_value)
 
   env_value <- Sys.getenv(env_name, unset = NA_character_)
   if (!is.na(env_value) && nzchar(env_value)) return(env_value)

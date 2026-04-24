@@ -36,19 +36,47 @@ if (!nzchar(R_SCRIPT)) {
 TEST_OUTPUT_DIR <- get_path_setting("output-dir", "TEST_OUTPUT_DIR", "outputs_regression_tests", base_dir = REPO_DIR)
 dir.create(TEST_OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
+REGRESSION_CONFIG_PATH <- file.path(TEST_OUTPUT_DIR, "regression_test_config.R")
+writeLines(
+  c(
+    sprintf(
+      "sys.source(\"%s\", envir = environment())",
+      gsub("\\\\", "/", file.path(REPO_DIR, "configs", "base_config.R"))
+    ),
+    "CONFIG$experiment$data_path <- \"testfile_zinb_nonlinear_eintritte.csv\"",
+    "CONFIG$experiment$target <- \"n_eintritte\"",
+    "CONFIG$experiment$feature_cols <- c(\"prcrank\", \"potenzielle_kunden\", \"unfalldeckung\")",
+    "CONFIG$experiment$id_cols <- character(0)",
+    "CONFIG$experiment$row_filter <- \"\"",
+    "CONFIG$results$run_name <- \"\"",
+    "CONFIG$results$version_runs <- FALSE"
+  ),
+  REGRESSION_CONFIG_PATH
+)
+
 record_test <- function(name, ok, details) {
   data.table(test = name, ok = isTRUE(ok), details = as.character(details))
+}
+
+merge_env <- function(base_env, extra_env) {
+  parse_names <- function(values) sub("=.*$", "", values)
+  if (length(extra_env) == 0) return(base_env)
+  base_names <- parse_names(base_env)
+  extra_names <- parse_names(extra_env)
+  keep <- !(base_names %in% extra_names)
+  c(base_env[keep], extra_env)
 }
 
 run_script <- function(script_name, args = character(0), env = character(0), workdir = REPO_DIR) {
   script_path <- file.path(REPO_DIR, script_name)
   output <- tempfile(pattern = "regression_test_", tmpdir = TEST_OUTPUT_DIR, fileext = ".txt")
+  base_env <- c(sprintf("CONFIG_PATH=%s", REGRESSION_CONFIG_PATH))
   status <- system2(
     R_SCRIPT,
     c(script_path, args),
     stdout = output,
     stderr = output,
-    env = env,
+    env = merge_env(base_env, env),
     wait = TRUE
   )
   list(
