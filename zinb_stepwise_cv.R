@@ -203,6 +203,14 @@ fit_convergence_reason <- function(fit, warnings = character(0)) {
   )
 }
 
+zinb_progress_info <- function(prefix = NULL, ...) {
+  if (!is.null(prefix) && nzchar(prefix)) {
+    log_info(prefix, ": ", ...)
+  } else {
+    log_info(...)
+  }
+}
+
 zinb_fit_attempts <- function() {
   list(
     list(label = "em100", EM = TRUE, maxit = 100L),
@@ -211,11 +219,17 @@ zinb_fit_attempts <- function() {
   )
 }
 
-fit_zinb_with_retries <- function(dt, formula_obj) {
+fit_zinb_with_retries <- function(dt, formula_obj, progress_prefix = NULL) {
   failure_reasons <- character(0)
 
   for (attempt in zinb_fit_attempts()) {
+    attempt_started_at <- Sys.time()
     fit_warnings <- character(0)
+    zinb_progress_info(
+      progress_prefix,
+      "starting fit attempt ", attempt$label,
+      " (EM=", attempt$EM, ", maxit=", attempt$maxit, ")"
+    )
     fit <- tryCatch(
       withCallingHandlers(
         zeroinfl(
@@ -234,24 +248,43 @@ fit_zinb_with_retries <- function(dt, formula_obj) {
     )
 
     if (inherits(fit, "zinb_fit_error")) {
+      zinb_progress_info(
+        progress_prefix,
+        "fit attempt ", attempt$label, " failed after ",
+        format(round(as.numeric(difftime(Sys.time(), attempt_started_at, units = "secs")), 2), nsmall = 2),
+        "s: ", fit$message
+      )
       failure_reasons <- c(failure_reasons, sprintf("%s: fit failed: %s", attempt$label, fit$message))
       next
     }
 
     convergence_reason <- fit_convergence_reason(fit, warnings = fit_warnings)
     if (!is.na(convergence_reason)) {
+      zinb_progress_info(
+        progress_prefix,
+        "fit attempt ", attempt$label, " did not converge after ",
+        format(round(as.numeric(difftime(Sys.time(), attempt_started_at, units = "secs")), 2), nsmall = 2),
+        "s: ", convergence_reason
+      )
       failure_reasons <- c(failure_reasons, sprintf("%s: %s", attempt$label, convergence_reason))
       next
     }
 
+    zinb_progress_info(
+      progress_prefix,
+      "fit attempt ", attempt$label, " succeeded in ",
+      format(round(as.numeric(difftime(Sys.time(), attempt_started_at, units = "secs")), 2), nsmall = 2),
+      "s"
+    )
     return(list(ok = TRUE, model = fit, attempt = attempt$label))
   }
 
+  zinb_progress_info(progress_prefix, "all fit attempts failed")
   list(ok = FALSE, reason = paste(unique(failure_reasons), collapse = " || "))
 }
 
-fit_predict_one_fold <- function(train_dt, test_dt, formula_obj) {
-  fit_result <- fit_zinb_with_retries(train_dt, formula_obj)
+fit_predict_one_fold <- function(train_dt, test_dt, formula_obj, progress_prefix = NULL) {
+  fit_result <- fit_zinb_with_retries(train_dt, formula_obj, progress_prefix = progress_prefix)
   if (!isTRUE(fit_result$ok)) {
     return(list(ok = FALSE, reason = fit_result$reason))
   }
@@ -305,20 +338,31 @@ fit_predict_one_fold <- function(train_dt, test_dt, formula_obj) {
   )
 }
 
-fit_zinb_model <- function(dt, formula_obj) {
-  fit_zinb_with_retries(dt, formula_obj)
+fit_zinb_model <- function(dt, formula_obj, progress_prefix = NULL) {
+  fit_zinb_with_retries(dt, formula_obj, progress_prefix = progress_prefix)
 }
 
-evaluate_formula_cv <- function(dt, target, fold_ids, formula_obj, metric = "rmse") {
+evaluate_formula_cv <- function(dt, target, fold_ids, formula_obj, metric = "rmse", progress_prefix = NULL) {
   n_folds <- max(fold_ids)
   fold_results <- vector("list", n_folds)
   pred_list <- vector("list", n_folds)
 
   for (fold in seq_len(n_folds)) {
+    fold_started_at <- Sys.time()
     train_dt <- dt[fold_ids != fold]
     test_dt <- dt[fold_ids == fold]
+    fold_prefix <- if (!is.null(progress_prefix) && nzchar(progress_prefix)) {
+      paste0(progress_prefix, " | fold ", fold, "/", n_folds)
+    } else {
+      sprintf("fold %s/%s", fold, n_folds)
+    }
+    zinb_progress_info(
+      fold_prefix,
+      "starting with train rows=", nrow(train_dt),
+      ", test rows=", nrow(test_dt)
+    )
 
-    res <- fit_predict_one_fold(train_dt, test_dt, formula_obj)
+    res <- fit_predict_one_fold(train_dt, test_dt, formula_obj, progress_prefix = fold_prefix)
     if (!isTRUE(res$ok)) {
       return(list(ok = FALSE, reason = sprintf("%s in fold %s", res$reason, fold)))
     }
@@ -335,6 +379,12 @@ evaluate_formula_cv <- function(dt, target, fold_ids, formula_obj, metric = "rms
       error = res$pred - test_dt[[target]],
       abs_error = abs(res$pred - test_dt[[target]]),
       negloglik = res$point_negloglik
+    )
+    zinb_progress_info(
+      fold_prefix,
+      "finished in ",
+      format(round(as.numeric(difftime(Sys.time(), fold_started_at, units = "secs")), 2), nsmall = 2),
+      "s"
     )
   }
 
@@ -590,9 +640,26 @@ is_improvement <- function(candidate_score, current_score, metric, min_improveme
 }
 
 evaluate_candidate <- function(spec, work_dt, target, fold_ids, metric) {
-  ev <- evaluate_formula_cv(work_dt, target, fold_ids, spec$formula_obj, metric = metric)
+  candidate_prefix <- sprintf(
+    "step %s candidate %s [%s/%s]",
+    spec$step, spec$candidate_order, spec$variable, spec$transformation
+  )
+  zinb_progress_info(candidate_prefix, "starting formula ", formula_label(spec$formula_obj))
+  candidate_started_at <- Sys.time()
+  ev <- evaluate_formula_cv(
+    work_dt, target, fold_ids, spec$formula_obj,
+    metric = metric,
+    progress_prefix = candidate_prefix
+  )
 
   if (isTRUE(ev$ok)) {
+    zinb_progress_info(
+      candidate_prefix,
+      "finished in ",
+      format(round(as.numeric(difftime(Sys.time(), candidate_started_at, units = "secs")), 2), nsmall = 2),
+      "s with ", metric, "=",
+      format(ev$score, digits = 8)
+    )
     summary <- data.table(
       step = spec$step,
       candidate_order = spec$candidate_order,
@@ -614,6 +681,12 @@ evaluate_candidate <- function(spec, work_dt, target, fold_ids, metric) {
     return(list(ok = TRUE, summary = summary, eval = ev))
   }
 
+  zinb_progress_info(
+    candidate_prefix,
+    "failed after ",
+    format(round(as.numeric(difftime(Sys.time(), candidate_started_at, units = "secs")), 2), nsmall = 2),
+    "s: ", ev$reason
+  )
   list(
     ok = FALSE,
     failure = data.table(
@@ -850,7 +923,11 @@ with_run_finalizer({
   .script_ok <- TRUE
 
   log_info("Refitting final ZINB model on the full dataset for interpretation outputs")
-  final_fit <- fit_zinb_model(work_dt, final_formula_obj)
+  final_fit <- fit_zinb_model(
+    work_dt,
+    final_formula_obj,
+    progress_prefix = "Final full-data refit"
+  )
   if (isTRUE(final_fit$ok)) {
     final_fit_summary <- summary(final_fit$model)
     count_coef <- data.table::as.data.table(final_fit_summary$coefficients$count, keep.rownames = "term")
