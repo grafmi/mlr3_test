@@ -209,6 +209,60 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
+# 5. preprocess_data.R should report row removals separately for filter and na.omit()
+preprocess_fixture_dir <- file.path(TEST_OUTPUT_DIR, "preprocess_fixture")
+unlink(preprocess_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(preprocess_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+preprocess_input <- file.path(preprocess_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    id = 1:5,
+    keep_flag = c(TRUE, TRUE, FALSE, TRUE, FALSE),
+    x = c(10, NA, 30, 40, 50),
+    y = c("a", "b", "c", "d", "e")
+  ),
+  preprocess_input
+)
+
+preprocess_out <- file.path(preprocess_fixture_dir, "outputs")
+preprocess_run <- run_script(
+  "preprocess_data.R",
+  args = c(
+    sprintf("--input=%s", preprocess_input),
+    sprintf("--output-dir=%s", preprocess_out),
+    "--filter=keep_flag == TRUE",
+    "--drop-missing-rows=true"
+  )
+)
+preprocess_summary <- read_csv_if_exists(file.path(preprocess_out, "preprocessed_dataset_metadata_summary.csv"))
+preprocess_log_path <- file.path(preprocess_out, "preprocess_data.log")
+preprocess_log <- if (file.exists(preprocess_log_path)) {
+  paste(readLines(preprocess_log_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+
+preprocess_ok <- preprocess_run$status == 0 &&
+  !is.null(preprocess_summary) &&
+  nrow(preprocess_summary) == 1 &&
+  "rows_removed_by_filter" %in% names(preprocess_summary) &&
+  "rows_removed_by_na_omit" %in% names(preprocess_summary) &&
+  identical(as.integer(preprocess_summary$rows_removed_by_filter[[1]]), 2L) &&
+  identical(as.integer(preprocess_summary$rows_removed_by_na_omit[[1]]), 1L) &&
+  grepl("Dropped 2 row\\(s\\) via row filter during preprocessing\\.", preprocess_log) &&
+  grepl("Dropped 1 row\\(s\\) with missing values during preprocessing\\.", preprocess_log)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "preprocess_reports_filter_and_na_omit_rows_separately",
+  preprocess_ok,
+  if (preprocess_ok) {
+    "preprocess metadata and log separate filter and na.omit row removals"
+  } else {
+    paste("preprocess_data.R did not report separate row removals as expected:", preprocess_run$output)
+  }
+)
+
 results <- rbindlist(tests, fill = TRUE)
 safe_write_csv(results, file.path(TEST_OUTPUT_DIR, "regression_test_results.csv"))
 

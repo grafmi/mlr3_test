@@ -434,6 +434,9 @@ outputs_preprocessed/preprocessed_dataset_metadata.rds
 outputs_preprocessed/preprocess_data.log
 ```
 
+The preprocessing summary metadata includes separate row-removal counts for
+the row filter and for `na.omit()`-based missing-value removal.
+
 Factor handling policy:
 
 - `preprocess_data.R` converts `character` columns to `factor` by default

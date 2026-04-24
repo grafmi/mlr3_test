@@ -812,8 +812,9 @@ write_dataset_formats <- function(dt, output_dir, output_basename, formats) {
 }
 
 build_dataset_metadata <- function(original_dt, processed_dt, source_path,
-                                   filter_expression = "", keep_cols = character(0),
-                                   drop_cols = character(0), drop_missing_rows = FALSE,
+                                   filter_expression = "", rows_removed_by_filter = 0L,
+                                   keep_cols = character(0), drop_cols = character(0),
+                                   drop_missing_rows = FALSE, rows_removed_by_na_omit = 0L,
                                    output_files = NULL) {
   source_path <- normalizePath(source_path, mustWork = FALSE)
 
@@ -825,6 +826,8 @@ build_dataset_metadata <- function(original_dt, processed_dt, source_path,
     rows_output = nrow(processed_dt),
     cols_output = ncol(processed_dt),
     rows_removed = nrow(original_dt) - nrow(processed_dt),
+    rows_removed_by_filter = as.integer(rows_removed_by_filter),
+    rows_removed_by_na_omit = as.integer(rows_removed_by_na_omit),
     filter_expression = if (nzchar(filter_expression)) filter_expression else NA_character_,
     keep_cols = if (length(keep_cols) > 0) paste(keep_cols, collapse = ", ") else NA_character_,
     drop_cols = if (length(drop_cols) > 0) paste(drop_cols, collapse = ", ") else NA_character_,

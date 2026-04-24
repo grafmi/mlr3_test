@@ -121,7 +121,9 @@ apply_keep_drop_columns <- function(dt, keep_cols, drop_cols) {
 }
 
 apply_row_filter <- function(dt, filter_expression) {
-  if (!nzchar(trimws(filter_expression))) return(data.table::copy(dt))
+  if (!nzchar(trimws(filter_expression))) {
+    return(list(data = data.table::copy(dt), rows_removed = 0L))
+  }
 
   filter_call <- tryCatch(
     parse(text = filter_expression)[[1]],
@@ -158,7 +160,8 @@ apply_row_filter <- function(dt, filter_expression) {
     stop("Filter expression returned NA values. Please make the condition explicit.", call. = FALSE)
   }
 
-  dt[keep_rows]
+  filtered_dt <- dt[keep_rows]
+  list(data = filtered_dt, rows_removed = nrow(dt) - nrow(filtered_dt))
 }
 
 drop_missing_rows_if_requested <- function(dt, drop_missing_rows) {
@@ -216,7 +219,8 @@ with_run_finalizer({
   validate_preprocess_settings(original_dt, KEEP_COLS, DROP_COLS, OUTPUT_FORMATS)
 
   processed_dt <- apply_keep_drop_columns(original_dt, KEEP_COLS, DROP_COLS)
-  processed_dt <- apply_row_filter(processed_dt, ROW_FILTER)
+  filter_result <- apply_row_filter(processed_dt, ROW_FILTER)
+  processed_dt <- filter_result$data
   if (CHARS_TO_FACTORS) {
     processed_dt <- coerce_character_columns_to_factor(processed_dt)
   }
@@ -228,6 +232,9 @@ with_run_finalizer({
     stop("No rows remain after preprocessing.", call. = FALSE)
   }
 
+  if (filter_result$rows_removed > 0) {
+    log_info("Dropped ", filter_result$rows_removed, " row(s) via row filter during preprocessing.")
+  }
   if (drop_result$rows_dropped > 0) {
     log_info("Dropped ", drop_result$rows_dropped, " row(s) with missing values during preprocessing.")
   }
@@ -243,9 +250,11 @@ with_run_finalizer({
     processed_dt = processed_dt,
     source_path = INPUT_PATH,
     filter_expression = ROW_FILTER,
+    rows_removed_by_filter = filter_result$rows_removed,
     keep_cols = KEEP_COLS,
     drop_cols = DROP_COLS,
     drop_missing_rows = DROP_MISSING_ROWS,
+    rows_removed_by_na_omit = drop_result$rows_dropped,
     output_files = output_files
   )
   write_metadata_bundle(metadata, OUTPUT_DIR, prefix = metadata_prefix)
