@@ -3,6 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_PATH="${CONFIG_PATH:-$SCRIPT_DIR/configs/base_config.R}"
 
 CONFIG_RESULTS_ROOT="${CONFIG_RESULTS_ROOT:-results}"
 VERSION_RUNS="${VERSION_RUNS:-true}"
@@ -71,8 +72,10 @@ export COMPARISON_OUTPUT_DIR
 export MLR3_DATA_PATH
 export RUN_OUTPUT_ROOT
 export RUN_SUMMARY_OUTPUT_DIR
+export CONFIG_PATH
 
 echo "Repository directory: $SCRIPT_DIR"
+echo "Config file: $CONFIG_PATH"
 echo "Data file: $MLR3_DATA_PATH"
 echo "Version runs: $VERSION_RUNS"
 if [[ "$VERSION_RUNS" == "true" ]]; then

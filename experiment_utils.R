@@ -90,16 +90,20 @@ get_path_setting <- function(arg_name, env_name, default, base_dir) {
   resolve_path(get_setting(arg_name, env_name, default), base_dir)
 }
 
+get_project_config_path <- function(repo_dir) {
+  get_path_setting("config", "CONFIG_PATH", file.path("configs", "base_config.R"), base_dir = repo_dir)
+}
+
 load_project_config <- function(repo_dir) {
-  config_path <- file.path(repo_dir, "config.R")
+  config_path <- get_project_config_path(repo_dir)
   if (!file.exists(config_path)) {
-    stop("Could not find config.R in repository root: ", normalizePath(config_path, mustWork = FALSE), call. = FALSE)
+    stop("Could not find config file: ", normalizePath(config_path, mustWork = FALSE), call. = FALSE)
   }
 
   config_env <- new.env(parent = baseenv())
   sys.source(config_path, envir = config_env)
   if (!exists("CONFIG", envir = config_env, inherits = FALSE)) {
-    stop("config.R must define an object named CONFIG.", call. = FALSE)
+    stop("Config file must define an object named CONFIG.", call. = FALSE)
   }
 
   get("CONFIG", envir = config_env, inherits = FALSE)

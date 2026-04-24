@@ -7,7 +7,7 @@ The count nature of the target is handled explicitly by the ZINB experiment. The
 `ranger` and XGBoost experiments intentionally treat the target as a regression
 problem for now.
 
-Most experiment defaults now live in `config.R`. The scripts use those values
+Most experiment defaults now live in `configs/base_config.R`. The scripts use those values
 as readable defaults and still allow explicit overrides via command-line
 arguments and environment variables.
 
@@ -15,7 +15,7 @@ arguments and environment variables.
 
 For most users, these are the main steps:
 
-1. Adjust the dataset path and core experiment settings in `config.R`
+1. Adjust the dataset path and core experiment settings in `configs/base_config.R`
 2. Optionally run `Rscript validate_repo.R` for a quick smoke check
 3. Optionally run `Rscript run_regression_tests.R` for lightweight regression tests
 4. Run the full pipeline on Linux with `./run_all.sh`
@@ -116,7 +116,7 @@ coupled to the evaluation data than the nested mlr3 setup.
 The main place to edit experiment settings is:
 
 ```text
-config.R
+configs/base_config.R
 ```
 
 The file is grouped so that the most important settings appear first:
@@ -136,9 +136,9 @@ The scripts use this precedence order:
 
 1. command-line argument
 2. environment variable
-3. `config.R`
+3. the selected config file, defaulting to `configs/base_config.R`
 
-You can also set an explicit data path directly in `config.R`, which is often
+You can also set an explicit data path directly in `configs/base_config.R`, which is often
 the most convenient option for day-to-day experimentation:
 
 ```r
@@ -157,8 +157,12 @@ columns that are present in the dataset but are not modeled as predictors.
 
 For `CONFIG$ranger$search_space` and `CONFIG$xgboost$search_space`, supported
 optional parameters can also be removed or commented out. If a known optional
-entry is missing in `config.R`, that parameter is simply not tuned in the
-corresponding script.
+entry is missing in the selected config file, that parameter is simply not
+tuned in the corresponding script.
+
+If you want to run a named variant, pass `--config=/path/to/configs/my_variant.R`
+or set `CONFIG_PATH=/path/to/configs/my_variant.R`. Variant config files should
+define a `CONFIG` object just like `configs/base_config.R`.
 
 For ZINB, `CONFIG$zinb$zero_inflation_formula` controls the right-hand side of
 the zero-inflation part. Examples:
@@ -409,7 +413,8 @@ Expected repository layout:
 
 ```text
 .
-├── config.R
+├── configs/
+│   └── base_config.R
 ├── preprocess_data.R
 ├── validate_repo.R
 ├── run_regression_tests.R

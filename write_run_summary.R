@@ -24,6 +24,7 @@ source_experiment_utils <- function() {
 UTILS_PATH <- source_experiment_utils()
 REPO_DIR <- dirname(UTILS_PATH)
 CONFIG <- load_project_config(REPO_DIR)
+CONFIG_PATH <- get_project_config_path(REPO_DIR)
 
 require_packages(c("data.table"))
 suppressPackageStartupMessages(library(data.table))
@@ -116,6 +117,7 @@ run_context_dt <- data.table(
   repo_dir = normalizePath(REPO_DIR, mustWork = FALSE),
   run_output_root = normalizePath(RUN_OUTPUT_ROOT, mustWork = FALSE),
   results_root_dir = RESULTS_ROOT_DIR,
+  config_path = normalizePath(CONFIG_PATH, mustWork = FALSE),
   data_path = Sys.getenv("MLR3_DATA_PATH", unset = NA_character_),
   ranger_output_dir = Sys.getenv("RANGER_OUTPUT_DIR", unset = NA_character_),
   xgb_output_dir = Sys.getenv("XGB_OUTPUT_DIR", unset = NA_character_),
@@ -124,7 +126,7 @@ run_context_dt <- data.table(
 )
 safe_write_csv(run_context_dt, file.path(OUTPUT_DIR, "run_context.csv"))
 write_config_snapshot(OUTPUT_DIR, CONFIG, prefix = "config_snapshot")
-write_text_file(file.path(OUTPUT_DIR, "config_snapshot.R"), readLines(file.path(REPO_DIR, "config.R"), warn = FALSE))
+write_text_file(file.path(OUTPUT_DIR, "config_snapshot.R"), readLines(CONFIG_PATH, warn = FALSE))
 
 report_lines <- c(
   sprintf("# Run Report: %s", RUN_ID),
