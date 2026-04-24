@@ -158,11 +158,16 @@ CONFIG <- list(
     workers = 16L,
 
     # Allowed transformations for numeric predictors during forward selection.
-    transformations_numeric = c("raw", "sqrt", "log1p", "ns2", "poly2"),
+    transformations_numeric = c("raw", "sqrt", "log1p", "ns2", "poly2", "factor"),
 
     # Allowed transformations for factor predictors. In the current setup,
     # factors are only used in raw form.
     transformations_factor = c("raw"),
+
+    # Numeric predictors with at most this many observed values are also
+    # evaluated as factor-like candidates via factor(var). This is useful for
+    # binned or class-coded numeric variables such as age classes.
+    numeric_as_factor_max_levels = 12L,
 
     # Formula right-hand side for the zero-inflation part. Use "1" for an
     # intercept-only zero part, or set an explicit formula such as

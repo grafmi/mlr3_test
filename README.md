@@ -174,6 +174,11 @@ zero-inflation formula and all configured feature transformations against the
 modeling data. That catches missing columns and invalid formula terms earlier,
 before a longer CV run starts.
 
+For ZINB, numeric predictors can also be tested as categorical candidates via
+`factor(var)`. By default this is enabled only for numeric variables with at
+most `CONFIG$zinb$numeric_as_factor_max_levels` observed values, which works
+well for binned features such as age classes.
+
 For count-aware evaluation, the scripts now also report:
 
 - `poisson_deviance`: useful as a count-focused error measure across models
@@ -262,6 +267,7 @@ Rscript mlr3_ranger_tuning.R --row-filter="split == 'train'" --features=prcrank,
 Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5 --tune-evals=20 --workers=4
 Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
 Rscript zinb_stepwise_cv.R --metric=poisson_deviance --max-vars=3 --workers=4
+Rscript zinb_stepwise_cv.R --numeric-as-factor-max-levels=8
 Rscript compare_best_models.R --metric=rmse
 ```
 
@@ -274,7 +280,8 @@ The same settings can be controlled with environment variables, for example
 `MLR3_DATA_PATH`, `ROW_FILTER`, `N_FOLDS`, `INNER_FOLDS`, `TUNE_EVALS`, `N_WORKERS`,
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
 `COMPARISON_OUTPUT_DIR`. ZINB also supports `ZINB_WORKERS`, which takes
-precedence over `N_WORKERS` for that script.
+precedence over `N_WORKERS` for that script. Additional ZINB-specific overrides
+include `ZINB_ZERO_FORMULA` and `ZINB_NUMERIC_AS_FACTOR_MAX_LEVELS`.
 
 For reproducibility, the default worker count is `1`. Increase `--workers` for
 faster mlr3 runs and for parallel ZINB candidate evaluation on Linux.

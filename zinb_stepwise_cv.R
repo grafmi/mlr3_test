@@ -68,6 +68,11 @@ N_WORKERS <- get_int_setting(
 )
 TRANSFORMATIONS_NUMERIC <- config_value(CONFIG, c("zinb", "transformations_numeric"))
 TRANSFORMATIONS_FACTOR <- config_value(CONFIG, c("zinb", "transformations_factor"))
+NUMERIC_AS_FACTOR_MAX_LEVELS <- get_int_setting(
+  "numeric-as-factor-max-levels", "ZINB_NUMERIC_AS_FACTOR_MAX_LEVELS",
+  config_value(CONFIG, c("zinb", "numeric_as_factor_max_levels")),
+  min_value = 2
+)
 ZERO_INFLATION_FORMULA <- trimws(get_setting(
   "zero-formula", "ZINB_ZERO_FORMULA",
   config_value(CONFIG, c("zinb", "zero_inflation_formula"))
@@ -92,6 +97,10 @@ valid_transformations <- function(x) {
   if (is.numeric(x)) {
     allowed <- c("raw", "ns2", "poly2")
     if (is_nonnegative(x)) allowed <- c(allowed, "sqrt", "log1p")
+    n_unique <- data.table::uniqueN(x[!is.na(x)])
+    if (n_unique >= 2L && n_unique <= NUMERIC_AS_FACTOR_MAX_LEVELS) {
+      allowed <- c(allowed, "factor")
+    }
     return(intersect(TRANSFORMATIONS_NUMERIC, allowed))
   }
   intersect(TRANSFORMATIONS_FACTOR, "raw")
@@ -107,6 +116,7 @@ term_for <- function(var, transformation) {
   switch(
     transformation,
     raw = qvar,
+    factor = sprintf("factor(%s)", qvar),
     sqrt = sprintf("sqrt(%s)", qvar),
     log1p = sprintf("log1p(%s)", qvar),
     ns2 = sprintf("ns(%s, df = 2)", qvar),
@@ -438,7 +448,8 @@ with_run_finalizer({
     workers = N_WORKERS,
     zero_inflation_formula = ZERO_INFLATION_FORMULA,
     transformations_numeric = TRANSFORMATIONS_NUMERIC,
-    transformations_factor = TRANSFORMATIONS_FACTOR
+    transformations_factor = TRANSFORMATIONS_FACTOR,
+    numeric_as_factor_max_levels = NUMERIC_AS_FACTOR_MAX_LEVELS
   )
   write_config_snapshot(OUTPUT_DIR, resolved_config)
 
@@ -455,6 +466,7 @@ with_run_finalizer({
       "Folds" = N_FOLDS,
       "Workers" = N_WORKERS,
       "Row filter" = if (nzchar(trimws(ROW_FILTER))) ROW_FILTER else "<none>",
+      "Numeric-as-factor max levels" = NUMERIC_AS_FACTOR_MAX_LEVELS,
       "Zero-inflation formula" = ZERO_INFLATION_FORMULA,
       "Max vars / min improvement" = paste(MAX_VARS, MIN_IMPROVEMENT, sep = " / ")
     )
@@ -726,6 +738,7 @@ with_run_finalizer({
     sprintf("- seed: `%s`", SEED),
     sprintf("- folds: `%s`", N_FOLDS),
     sprintf("- workers: `%s`", N_WORKERS),
+    sprintf("- numeric_as_factor_max_levels: `%s`", NUMERIC_AS_FACTOR_MAX_LEVELS),
     sprintf("- optimization_metric: `%s`", METRIC_TO_OPTIMIZE),
     sprintf("- stop_reason: `%s`", stop_reason),
     "",
