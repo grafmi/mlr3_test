@@ -95,7 +95,7 @@ CONFIG <- list(
       sample_fraction = c(0.5, 1.0),
 
       # Optional tree depth limit. Larger values allow more complex trees.
-      max_depth = c(0L, 12L),
+      max_depth = c(1L, 12L),
 
       # Candidate split rules for regression forests. "variance" is the
       # standard baseline; "extratrees" adds more randomness.
@@ -167,10 +167,11 @@ CONFIG <- list(
     verbosity = "batch",
 
     # Parallel backend for ZINB candidate evaluation.
-    # "fork" is fast on many Linux setups but can behave poorly in some
-    # environments. "psock" is usually more isolated and is worth testing
-    # when forked workers appear to hang. "sequential" disables parallelism.
-    parallel_backend = "fork",
+    # "psock" is the safer default across mixed environments.
+    # "fork" can be faster on some Linux systems, but has shown hangs in
+    # certain external batch/runtime setups. "sequential" disables
+    # parallelism for debugging or stability checks.
+    parallel_backend = "psock",
 
     # Allowed transformations for numeric predictors during forward selection.
     transformations_numeric = c("raw", "sqrt", "log1p", "ns2", "poly2", "factor"),
