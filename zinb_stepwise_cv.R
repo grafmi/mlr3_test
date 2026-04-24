@@ -35,6 +35,8 @@ suppressPackageStartupMessages({
   library(splines)
 })
 
+MAIN_PROCESS_PID <- Sys.getpid()
+
 # =========================
 # User settings
 # =========================
@@ -204,6 +206,9 @@ fit_convergence_reason <- function(fit, warnings = character(0)) {
 }
 
 zinb_progress_info <- function(prefix = NULL, ...) {
+  if (!identical(Sys.getpid(), MAIN_PROCESS_PID)) {
+    return(invisible(NULL))
+  }
   if (!is.null(prefix) && nzchar(prefix)) {
     log_info(prefix, ": ", ...)
   } else {
@@ -710,6 +715,12 @@ evaluate_candidates_parallel <- function(candidate_specs, work_dt, target, fold_
     message("Parallel ZINB candidate evaluation uses forked workers and is only enabled on Unix-like systems. Falling back to sequential execution.")
     return(lapply(candidate_specs, evaluate_candidate, work_dt = work_dt, target = target, fold_ids = fold_ids, metric = metric))
   }
+
+  log_info(
+    "Evaluating ", length(candidate_specs),
+    " candidate formula(s) in parallel with ",
+    min(workers, length(candidate_specs)), " worker(s)"
+  )
 
   parallel::mclapply(
     candidate_specs,
