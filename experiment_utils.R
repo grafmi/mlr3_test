@@ -972,6 +972,9 @@ timestamp <- function() {
   format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")
 }
 
+.project_logging_state <- new.env(parent = emptyenv())
+.project_logging_state$connection <- NULL
+
 detect_cpu_cores <- function(logical = TRUE) {
   cores <- tryCatch(
     parallel::detectCores(logical = logical),
@@ -1001,6 +1004,11 @@ cpu_core_summary <- function() {
 
 log_info <- function(...) {
   cat(sprintf("[%s] ", timestamp()), ..., "\n", sep = "")
+  log_con <- .project_logging_state$connection
+  if (!is.null(log_con) && isOpen(log_con)) {
+    try(flush(log_con), silent = TRUE)
+  }
+  flush.console()
 }
 
 start_logging <- function(output_dir, script_name) {
@@ -1011,6 +1019,7 @@ start_logging <- function(output_dir, script_name) {
 
   sink(log_con, split = TRUE)
   sink(log_con, type = "message")
+  .project_logging_state$connection <- log_con
 
   log_info("Started ", script_name)
   log_info("Log file: ", normalizePath(log_path, mustWork = FALSE))
@@ -1031,6 +1040,7 @@ stop_logging <- function(log_state, status = "completed") {
   if (!is.null(log_state$connection) && isOpen(log_state$connection)) {
     close(log_state$connection)
   }
+  .project_logging_state$connection <- NULL
   log_state$closed <- TRUE
   invisible(NULL)
 }

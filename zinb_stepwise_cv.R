@@ -353,8 +353,17 @@ evaluate_formula_cv <- function(dt, target, fold_ids, formula_obj, metric = "rms
 }
 
 run_forward_selection <- function(work_dt, target, predictor_pool, fold_ids, zero_formula_rhs,
-                                  metric, max_vars, min_improvement, workers) {
+                                  metric, max_vars, min_improvement, workers,
+                                  progress_label = NULL) {
+  log_progress <- function(...) {
+    if (!is.null(progress_label) && nzchar(progress_label)) {
+      log_info(progress_label, ": ", ...)
+    }
+  }
+
+  selection_started_at <- Sys.time()
   baseline_formula <- make_formula(target, character(0), zero_formula_rhs = zero_formula_rhs)
+  log_progress("evaluating intercept-only baseline on ", max(fold_ids), " fold(s)")
   baseline_eval <- evaluate_formula_cv(work_dt, target, fold_ids, baseline_formula, metric = metric)
   if (!isTRUE(baseline_eval$ok)) {
     stop("The intercept-only ZINB baseline failed: ", baseline_eval$reason, call. = FALSE)
@@ -376,6 +385,7 @@ run_forward_selection <- function(work_dt, target, predictor_pool, fold_ids, zer
     remaining <- setdiff(predictor_pool, selected)
     if (length(remaining) == 0) {
       stop_reason <- "no_remaining_predictors"
+      log_progress("stopping before step ", step_i, ": no remaining predictors")
       break
     }
 
@@ -412,6 +422,11 @@ run_forward_selection <- function(work_dt, target, predictor_pool, fold_ids, zer
     }
 
     n_candidates_total <- length(candidate_specs)
+    log_progress(
+      "step ", step_i,
+      " with ", length(remaining), " remaining variable(s) and ",
+      n_candidates_total, " candidate formula(s)"
+    )
     results <- evaluate_candidates_parallel(
       candidate_specs,
       work_dt = work_dt,
@@ -430,6 +445,7 @@ run_forward_selection <- function(work_dt, target, predictor_pool, fold_ids, zer
     }
 
     if (length(candidates) == 0) {
+      log_progress("step ", step_i, " produced no valid candidate")
       step_diagnostics[[length(step_diagnostics) + 1L]] <- data.table(
         step = step_i,
         n_candidates_total = n_candidates_total,
@@ -456,6 +472,12 @@ run_forward_selection <- function(work_dt, target, predictor_pool, fold_ids, zer
     top_candidates_log[[length(top_candidates_log) + 1L]] <- top_candidates
     best_row <- step_table[1]
     improved <- is_improvement(best_row$optimization_score, current_best_score, metric, min_improvement)
+    log_progress(
+      "step ", step_i, " best candidate: ",
+      best_row$variable, " [", best_row$transformation, "] with ",
+      metric, "=", format(best_row$optimization_score, digits = 8),
+      " (valid=", n_candidates_valid, "/", n_candidates_total, ")"
+    )
 
     step_diagnostics[[length(step_diagnostics) + 1L]] <- data.table(
       step = step_i,
@@ -473,6 +495,7 @@ run_forward_selection <- function(work_dt, target, predictor_pool, fold_ids, zer
     search_log[[step_i]] <- copy(step_table)
     if (!improved) {
       stop_reason <- "no_min_improvement"
+      log_progress("stopping after step ", step_i, ": no improvement above threshold")
       break
     }
 
@@ -480,6 +503,12 @@ run_forward_selection <- function(work_dt, target, predictor_pool, fold_ids, zer
     selected_terms <- c(selected_terms, best_row$added_term)
     selected_transforms <- c(selected_transforms, best_row$transformation)
     current_best_score <- best_row$optimization_score
+    log_progress(
+      "accepted step ", step_i, ": selected ",
+      best_row$variable, " as ", best_row$transformation,
+      "; current best ", metric, "=",
+      format(current_best_score, digits = 8)
+    )
 
     best_idx <- which(
       vapply(candidates, function(x) {
@@ -498,6 +527,11 @@ run_forward_selection <- function(work_dt, target, predictor_pool, fold_ids, zer
 
   if (length(best_step_results) == 0) {
     if (is.na(stop_reason)) stop_reason <- "baseline_retained"
+    log_progress(
+      "selection finished in ",
+      format(round(as.numeric(difftime(Sys.time(), selection_started_at, units = "secs")), 2), nsmall = 2),
+      "s with intercept-only baseline"
+    )
     return(list(
       baseline_formula = baseline_formula,
       baseline_eval = baseline_eval,
@@ -524,6 +558,12 @@ run_forward_selection <- function(work_dt, target, predictor_pool, fold_ids, zer
   if (is.na(stop_reason)) {
     stop_reason <- if (length(remaining_after_selection) == 0) "no_remaining_predictors" else "max_steps_reached"
   }
+
+  log_progress(
+    "selection finished in ",
+    format(round(as.numeric(difftime(Sys.time(), selection_started_at, units = "secs")), 2), nsmall = 2),
+    "s with formula ", formula_label(best_global$eval$formula)
+  )
 
   list(
     baseline_formula = baseline_formula,
@@ -677,20 +717,27 @@ with_run_finalizer({
   overview_dt <- dataset_overview(work_dt, target = TARGET, feature_cols = FEATURE_COLS, id_cols = ID_COLS)
   safe_write_csv(overview_dt, file.path(OUTPUT_DIR, "zinb_dataset_overview.csv"))
 
+  log_info("Validating ZINB formulas and transformations on modeling data")
   validate_zinb_setup(work_dt, TARGET, FEATURE_COLS, ZERO_INFLATION_FORMULA)
 
   predictor_pool <- FEATURE_COLS
+  selection_fold_ids <- make_stratified_fold_ids(work_dt[[TARGET]], nfolds = INNER_FOLDS, seed = SEED, n_bins = STRATA_BINS)
   outer_fold_ids <- make_stratified_fold_ids(work_dt[[TARGET]], nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
+  log_info(
+    "Starting full-data ZINB selection for interpretation with ",
+    length(predictor_pool), " predictor(s) and ", INNER_FOLDS, " inner fold(s)"
+  )
   full_data_selection <- run_forward_selection(
     work_dt = work_dt,
     target = TARGET,
     predictor_pool = predictor_pool,
-    fold_ids = outer_fold_ids,
+    fold_ids = selection_fold_ids,
     zero_formula_rhs = ZERO_INFLATION_FORMULA,
     metric = METRIC_TO_OPTIMIZE,
     max_vars = MAX_VARS,
     min_improvement = MIN_IMPROVEMENT,
-    workers = N_WORKERS
+    workers = N_WORKERS,
+    progress_label = "Full-data selection"
   )
 
   safe_write_csv(full_data_selection$baseline_eval$overall, file.path(OUTPUT_DIR, "zinb_baseline_overall_metrics.csv"))
@@ -712,13 +759,21 @@ with_run_finalizer({
 
   outer_predictions <- list()
   outer_selected_models <- list()
+  log_info("Starting outer CV evaluation across ", N_FOLDS, " fold(s)")
   for (fold in seq_len(N_FOLDS)) {
+    fold_started_at <- Sys.time()
     train_dt <- work_dt[outer_fold_ids != fold]
     test_dt <- work_dt[outer_fold_ids == fold]
     inner_folds_now <- min(INNER_FOLDS, nrow(train_dt))
     if (inner_folds_now < 2L) {
       stop("ZINB inner CV needs at least 2 rows in each outer-training split.", call. = FALSE)
     }
+    log_info(
+      "Outer fold ", fold, "/", N_FOLDS,
+      ": train rows=", nrow(train_dt),
+      ", test rows=", nrow(test_dt),
+      ", inner folds=", inner_folds_now
+    )
     inner_fold_ids <- make_stratified_fold_ids(
       train_dt[[TARGET]],
       nfolds = inner_folds_now,
@@ -734,7 +789,8 @@ with_run_finalizer({
       metric = METRIC_TO_OPTIMIZE,
       max_vars = MAX_VARS,
       min_improvement = MIN_IMPROVEMENT,
-      workers = N_WORKERS
+      workers = N_WORKERS,
+      progress_label = paste0("Outer fold ", fold, " selection")
     )
     fold_fit <- fit_predict_one_fold(train_dt, test_dt, fold_selection$final_formula_obj)
     if (!isTRUE(fold_fit$ok)) {
@@ -765,6 +821,11 @@ with_run_finalizer({
         NA_character_
       }
     )
+    log_info(
+      "Outer fold ", fold, "/", N_FOLDS, " finished in ",
+      format(round(as.numeric(difftime(Sys.time(), fold_started_at, units = "secs")), 2), nsmall = 2),
+      "s with formula ", formula_label(fold_selection$final_formula_obj)
+    )
   }
 
   zinb_outer_predictions <- rbindlist(outer_predictions, fill = TRUE)
@@ -788,6 +849,7 @@ with_run_finalizer({
   print(final_formula_obj)
   .script_ok <- TRUE
 
+  log_info("Refitting final ZINB model on the full dataset for interpretation outputs")
   final_fit <- fit_zinb_model(work_dt, final_formula_obj)
   if (isTRUE(final_fit$ok)) {
     final_fit_summary <- summary(final_fit$model)
