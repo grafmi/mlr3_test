@@ -52,7 +52,7 @@ The most relevant outputs per script are:
 - `preprocess_data.R`: load data from common R and tabular formats, apply light preprocessing, and write dataset metadata
 - `mlr3_ranger_tuning.R`: nested CV for `ranger` regression with hyperparameter tuning
 - `mlr3_xgb_tuning.R`: nested CV for `xgboost` regression with hyperparameter tuning
-- `zinb_stepwise_cv.R`: stratified 10-fold CV with forward selection for a ZINB model
+- `zinb_stepwise_cv.R`: nested-style ZINB selection with inner forward selection and outer CV reporting
 - `compare_best_models.R`: read the best model outputs and create a ranked comparison
 - `validate_repo.R`: quick repository smoke check for packages, config, data, and output paths
 - `run_regression_tests.R`: lightweight regression suite for key failure and reporting paths
@@ -99,17 +99,23 @@ Why it matters:
 
 ### ZINB Stepwise CV
 
-The ZINB script follows a different but still explicit validation design:
+The ZINB script now uses a two-level validation design so its reported metrics
+are more comparable to the nested mlr3 models:
 
-- it uses stratified 10-fold CV
-- in each forward-selection step, candidate terms are scored by CV performance
-- one variable is added per step
-- each original variable may appear only once in the final model, regardless of transformation
+- outer folds are used only for out-of-sample evaluation
+- inside each outer-training split, a forward-selection search chooses the ZINB
+  count-model terms by inner CV performance
+- one original variable may be selected once, in one transformation, per inner
+  selection path
+- the reported `zinb_best_global_*` metrics and predictions come from the outer
+  folds
+- after evaluation, the selected full-data formula is refit once on the full
+  dataset to produce interpretable coefficient tables and the final model
+  summary
 
-So the ZINB script does not have a separate inner and outer loop. Instead, the
-same CV design is used to compare candidate formulas during forward selection.
-This is simpler, but it also means that the ZINB selection path is more tightly
-coupled to the evaluation data than the nested mlr3 setup.
+This means the ZINB ranking metrics are no longer taken from the same CV loop
+that selected the formula, which makes comparisons with `ranger` and
+`xgboost` materially fairer.
 
 ## Configuration
 
@@ -128,8 +134,8 @@ The file is grouped so that the most important settings appear first:
 - `CONFIG$preprocess`: preprocessing defaults and factor handling
 - `CONFIG$ranger`: ranger output directory and tuning defaults
 - `CONFIG$xgboost`: xgboost output directory and tuning defaults
-- `CONFIG$zinb`: ZINB output directory, metric, transformations, workers, and
-  zero-inflation formula
+- `CONFIG$zinb`: ZINB output directory, metric, transformations, workers,
+  numeric-as-factor controls, and zero-inflation formula
 - `CONFIG$comparison`: model-comparison defaults
 
 The scripts use this precedence order:
@@ -244,6 +250,7 @@ Useful overrides:
 VERSION_RUNS=false ./run_all.sh
 RUN_ID=baseline_a ./run_all.sh
 RESULTS_ROOT_DIR=/tmp/my_results ./run_all.sh
+CONFIG_PATH=configs/my_variant.R ./run_all.sh
 ```
 
 You can also run a lightweight preflight check before a longer experiment:
@@ -351,9 +358,18 @@ Additional ZINB transparency outputs include:
 
 - `zinb_step_diagnostics.csv` and `.rds`
 - `zinb_top_candidates_by_step.csv` and `.rds`
+- `zinb_outer_fold_selected_models.csv` and `.rds`
 - `zinb_final_model_summary.csv` / `.txt`
 - `zinb_final_model_count_coefficients.csv`
 - `zinb_final_model_zero_coefficients.csv`
+
+For ZINB specifically:
+
+- `zinb_best_global_overall_metrics.csv` and related `zinb_best_global_*` files
+  now summarize outer-CV performance
+- `zinb_final_model_summary.csv` and the coefficient tables come from the final
+  refit on the full dataset and are intended for interpretation, not unbiased
+  performance estimation
 
 `run_regression_tests.R` currently covers:
 
@@ -406,8 +422,9 @@ unfalldeckung
 FEATURE_COLS <- c("prcrank", "potenzielle_kunden", "unfalldeckung")
 ```
 
-For real data with more columns, edit `FEATURE_COLS` in the mlr3 and ZINB
-scripts to control which predictors are used.
+For real data with more columns, edit `CONFIG$experiment$feature_cols` in
+`configs/base_config.R` or in a variant config to control which predictors are
+used.
 
 Expected repository layout:
 
