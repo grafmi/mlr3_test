@@ -280,6 +280,7 @@ Rscript mlr3_ranger_tuning.R --row-filter="split == 'train'" --features=prcrank,
 Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5 --tune-evals=20 --workers=4
 Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
 Rscript zinb_stepwise_cv.R --metric=poisson_deviance --max-vars=3 --workers=4
+Rscript zinb_stepwise_cv.R --verbosity=detailed
 Rscript zinb_stepwise_cv.R --numeric-as-factor-max-levels=8
 Rscript zinb_stepwise_cv.R --numeric-as-factor-vars=age_band_num,tariff_class_num
 Rscript compare_best_models.R --metric=rmse
@@ -295,8 +296,9 @@ The same settings can be controlled with environment variables, for example
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
 `COMPARISON_OUTPUT_DIR`. ZINB also supports `ZINB_WORKERS`, which takes
 precedence over `N_WORKERS` for that script. Additional ZINB-specific overrides
-include `ZINB_ZERO_FORMULA`, `ZINB_NUMERIC_AS_FACTOR_MAX_LEVELS`, and
-`ZINB_NUMERIC_AS_FACTOR_VARS`.
+include `ZINB_ZERO_FORMULA`, `ZINB_NUMERIC_AS_FACTOR_MAX_LEVELS`,
+`ZINB_NUMERIC_AS_FACTOR_VARS`, `ZINB_PARALLEL_BACKEND`, and
+`ZINB_VERBOSITY`.
 
 For reproducibility, the default worker count is `1`. Increase `--workers` for
 faster mlr3 runs and for parallel ZINB candidate evaluation on Linux.
@@ -323,6 +325,12 @@ CONFIG$zinb$workers <- 7L
 
 On laptops or when running several jobs at once, values such as `4L` or `6L`
 are often the more stable choice even if more cores are available.
+
+For ZINB log output, `CONFIG$zinb$verbosity` (or `--verbosity`) supports:
+
+- `quiet`: only the main run milestones
+- `batch`: compact progress on selection steps, folds, and candidate batches
+- `detailed`: additional fold- and retry-level fit tracing for debugging
 
 ## Outputs And Tracking
 

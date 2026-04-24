@@ -160,6 +160,11 @@ CONFIG <- list(
     # default on a workstation is often physical CPU cores minus one.
     workers = 16L,
 
+    # Logging detail for ZINB runs. Use "batch" for compact progress logs,
+    # "detailed" for fold- and retry-level fit tracing, or "quiet" to reduce
+    # output to the main high-level milestones.
+    verbosity = "batch",
+
     # Allowed transformations for numeric predictors during forward selection.
     transformations_numeric = c("raw", "sqrt", "log1p", "ns2", "poly2", "factor"),
 

@@ -64,6 +64,10 @@ STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", config_value(CONFIG
 MAX_VARS <- get_numeric_setting("max-vars", "ZINB_MAX_VARS", config_value(CONFIG, c("zinb", "max_vars")), min_value = 1)
 MIN_IMPROVEMENT <- get_numeric_setting("min-improvement", "ZINB_MIN_IMPROVEMENT", config_value(CONFIG, c("zinb", "min_improvement")), min_value = 0)
 METRIC_TO_OPTIMIZE <- get_setting("metric", "METRIC_TO_OPTIMIZE", config_value(CONFIG, c("zinb", "metric")))
+ZINB_VERBOSITY <- trimws(tolower(get_setting(
+  "verbosity", "ZINB_VERBOSITY",
+  config_value(CONFIG, c("zinb", "verbosity"))
+)))
 PARALLEL_BACKEND <- trimws(tolower(get_setting(
   "parallel-backend", "ZINB_PARALLEL_BACKEND",
   if (.Platform$OS.type == "unix") "fork" else "psock"
@@ -100,6 +104,11 @@ if (!METRIC_TO_OPTIMIZE %in% ALLOWED_METRICS) {
 ALLOWED_PARALLEL_BACKENDS <- c("fork", "psock", "sequential")
 if (!PARALLEL_BACKEND %in% ALLOWED_PARALLEL_BACKENDS) {
   stop("ZINB parallel-backend must be one of: ", paste(ALLOWED_PARALLEL_BACKENDS, collapse = ", "), call. = FALSE)
+}
+
+ALLOWED_ZINB_VERBOSITY <- c("quiet", "batch", "detailed")
+if (!ZINB_VERBOSITY %in% ALLOWED_ZINB_VERBOSITY) {
+  stop("ZINB verbosity must be one of: ", paste(ALLOWED_ZINB_VERBOSITY, collapse = ", "), call. = FALSE)
 }
 
 # =========================
@@ -214,8 +223,16 @@ fit_convergence_reason <- function(fit, warnings = character(0)) {
   )
 }
 
-zinb_progress_info <- function(prefix = NULL, ...) {
+zinb_should_log <- function(level = "batch") {
+  ranks <- c(quiet = 1L, batch = 2L, detailed = 3L)
+  ranks[[ZINB_VERBOSITY]] >= ranks[[level]]
+}
+
+zinb_progress_info <- function(prefix = NULL, ..., level = "detailed") {
   if (!identical(Sys.getpid(), MAIN_PROCESS_PID)) {
+    return(invisible(NULL))
+  }
+  if (!zinb_should_log(level)) {
     return(invisible(NULL))
   }
   if (!is.null(prefix) && nzchar(prefix)) {
@@ -241,7 +258,8 @@ fit_zinb_with_retries <- function(dt, formula_obj, progress_prefix = NULL) {
     zinb_progress_info(
       progress_prefix,
       "starting fit attempt ", attempt$label,
-      " (EM=", attempt$EM, ", maxit=", attempt$maxit, ")"
+      " (EM=", attempt$EM, ", maxit=", attempt$maxit, ")",
+      level = "detailed"
     )
     fit <- tryCatch(
       withCallingHandlers(
@@ -265,7 +283,8 @@ fit_zinb_with_retries <- function(dt, formula_obj, progress_prefix = NULL) {
         progress_prefix,
         "fit attempt ", attempt$label, " failed after ",
         format(round(as.numeric(difftime(Sys.time(), attempt_started_at, units = "secs")), 2), nsmall = 2),
-        "s: ", fit$message
+        "s: ", fit$message,
+        level = "detailed"
       )
       failure_reasons <- c(failure_reasons, sprintf("%s: fit failed: %s", attempt$label, fit$message))
       next
@@ -277,7 +296,8 @@ fit_zinb_with_retries <- function(dt, formula_obj, progress_prefix = NULL) {
         progress_prefix,
         "fit attempt ", attempt$label, " did not converge after ",
         format(round(as.numeric(difftime(Sys.time(), attempt_started_at, units = "secs")), 2), nsmall = 2),
-        "s: ", convergence_reason
+        "s: ", convergence_reason,
+        level = "detailed"
       )
       failure_reasons <- c(failure_reasons, sprintf("%s: %s", attempt$label, convergence_reason))
       next
@@ -287,12 +307,13 @@ fit_zinb_with_retries <- function(dt, formula_obj, progress_prefix = NULL) {
       progress_prefix,
       "fit attempt ", attempt$label, " succeeded in ",
       format(round(as.numeric(difftime(Sys.time(), attempt_started_at, units = "secs")), 2), nsmall = 2),
-      "s"
+      "s",
+      level = "detailed"
     )
     return(list(ok = TRUE, model = fit, attempt = attempt$label))
   }
 
-  zinb_progress_info(progress_prefix, "all fit attempts failed")
+  zinb_progress_info(progress_prefix, "all fit attempts failed", level = "detailed")
   list(ok = FALSE, reason = paste(unique(failure_reasons), collapse = " || "))
 }
 
@@ -372,7 +393,8 @@ evaluate_formula_cv <- function(dt, target, fold_ids, formula_obj, metric = "rms
     zinb_progress_info(
       fold_prefix,
       "starting with train rows=", nrow(train_dt),
-      ", test rows=", nrow(test_dt)
+      ", test rows=", nrow(test_dt),
+      level = "detailed"
     )
 
     res <- fit_predict_one_fold(train_dt, test_dt, formula_obj, progress_prefix = fold_prefix)
@@ -397,7 +419,8 @@ evaluate_formula_cv <- function(dt, target, fold_ids, formula_obj, metric = "rms
       fold_prefix,
       "finished in ",
       format(round(as.numeric(difftime(Sys.time(), fold_started_at, units = "secs")), 2), nsmall = 2),
-      "s"
+      "s",
+      level = "detailed"
     )
   }
 
@@ -419,9 +442,7 @@ run_forward_selection <- function(work_dt, target, predictor_pool, fold_ids, zer
                                   metric, max_vars, min_improvement, workers,
                                   progress_label = NULL) {
   log_progress <- function(...) {
-    if (!is.null(progress_label) && nzchar(progress_label)) {
-      log_info(progress_label, ": ", ...)
-    }
+    zinb_progress_info(progress_label, ..., level = "batch")
   }
 
   selection_started_at <- Sys.time()
@@ -657,7 +678,7 @@ evaluate_candidate <- function(spec, work_dt, target, fold_ids, metric) {
     "step %s candidate %s [%s/%s]",
     spec$step, spec$candidate_order, spec$variable, spec$transformation
   )
-  zinb_progress_info(candidate_prefix, "starting formula ", formula_label(spec$formula_obj))
+  zinb_progress_info(candidate_prefix, "starting formula ", formula_label(spec$formula_obj), level = "detailed")
   candidate_started_at <- Sys.time()
   ev <- evaluate_formula_cv(
     work_dt, target, fold_ids, spec$formula_obj,
@@ -671,7 +692,8 @@ evaluate_candidate <- function(spec, work_dt, target, fold_ids, metric) {
       "finished in ",
       format(round(as.numeric(difftime(Sys.time(), candidate_started_at, units = "secs")), 2), nsmall = 2),
       "s with ", metric, "=",
-      format(ev$score, digits = 8)
+      format(ev$score, digits = 8),
+      level = "detailed"
     )
     summary <- data.table(
       step = spec$step,
@@ -698,7 +720,8 @@ evaluate_candidate <- function(spec, work_dt, target, fold_ids, metric) {
     candidate_prefix,
     "failed after ",
     format(round(as.numeric(difftime(Sys.time(), candidate_started_at, units = "secs")), 2), nsmall = 2),
-    "s: ", ev$reason
+    "s: ", ev$reason,
+    level = "detailed"
   )
   list(
     ok = FALSE,
@@ -729,20 +752,24 @@ evaluate_candidates_parallel <- function(candidate_specs, work_dt, target, fold_
       return(lapply(candidate_specs, evaluate_candidate, work_dt = work_dt, target = target, fold_ids = fold_ids, metric = metric))
     }
 
-    log_info(
+    zinb_progress_info(
+      NULL,
       "Evaluating ", length(candidate_specs),
       " candidate formula(s) in parallel with ",
-      worker_count, " fork worker(s) across ", length(batch_ids), " batch(es)"
+      worker_count, " fork worker(s) across ", length(batch_ids), " batch(es)",
+      level = "batch"
     )
 
     out <- vector("list", length(batch_ids))
     for (batch_i in seq_along(batch_ids)) {
       batch_idx <- batch_ids[[batch_i]]
       batch_worker_count <- min(worker_count, length(batch_idx))
-      log_info(
+      zinb_progress_info(
+        NULL,
         "Starting candidate batch ", batch_i, "/", length(batch_ids),
         " covering candidates ", min(batch_idx), "-", max(batch_idx),
-        " with ", batch_worker_count, " fork worker(s)"
+        " with ", batch_worker_count, " fork worker(s)",
+        level = "batch"
       )
       batch_started_at <- Sys.time()
       out[[batch_i]] <- parallel::mclapply(
@@ -756,21 +783,25 @@ evaluate_candidates_parallel <- function(candidate_specs, work_dt, target, fold_
         mc.preschedule = TRUE,
         mc.set.seed = TRUE
       )
-      log_info(
+      zinb_progress_info(
+        NULL,
         "Finished candidate batch ", batch_i, "/", length(batch_ids),
         " in ",
         format(round(as.numeric(difftime(Sys.time(), batch_started_at, units = "secs")), 2), nsmall = 2),
-        "s"
+        "s",
+        level = "batch"
       )
     }
 
     return(unlist(out, recursive = FALSE, use.names = FALSE))
   }
 
-  log_info(
+  zinb_progress_info(
+    NULL,
     "Evaluating ", length(candidate_specs),
     " candidate formula(s) in parallel with ",
-    worker_count, " PSOCK worker(s) across ", length(batch_ids), " batch(es)"
+    worker_count, " PSOCK worker(s) across ", length(batch_ids), " batch(es)",
+    level = "batch"
   )
 
   WORK_DT_PARALLEL <- work_dt
@@ -781,12 +812,12 @@ evaluate_candidates_parallel <- function(candidate_specs, work_dt, target, fold_
   cluster <- tryCatch(
     parallel::makePSOCKcluster(worker_count),
     error = function(e) {
-      log_info("Warning: could not start PSOCK workers: ", conditionMessage(e))
+      zinb_progress_info(NULL, "Warning: could not start PSOCK workers: ", conditionMessage(e), level = "batch")
       NULL
     }
   )
   if (is.null(cluster)) {
-    log_info("Falling back to sequential candidate evaluation.")
+    zinb_progress_info(NULL, "Falling back to sequential candidate evaluation.", level = "batch")
     return(lapply(candidate_specs, evaluate_candidate, work_dt = work_dt, target = target, fold_ids = fold_ids, metric = metric))
   }
   on.exit(parallel::stopCluster(cluster), add = TRUE)
@@ -824,9 +855,11 @@ evaluate_candidates_parallel <- function(candidate_specs, work_dt, target, fold_
   out <- vector("list", length(batch_ids))
   for (batch_i in seq_along(batch_ids)) {
     batch_idx <- batch_ids[[batch_i]]
-    log_info(
+    zinb_progress_info(
+      NULL,
       "Starting candidate batch ", batch_i, "/", length(batch_ids),
-      " covering candidates ", min(batch_idx), "-", max(batch_idx)
+      " covering candidates ", min(batch_idx), "-", max(batch_idx),
+      level = "batch"
     )
     batch_started_at <- Sys.time()
     out[[batch_i]] <- parallel::parLapplyLB(
@@ -842,11 +875,13 @@ evaluate_candidates_parallel <- function(candidate_specs, work_dt, target, fold_
         )
       }
     )
-    log_info(
+    zinb_progress_info(
+      NULL,
       "Finished candidate batch ", batch_i, "/", length(batch_ids),
       " in ",
       format(round(as.numeric(difftime(Sys.time(), batch_started_at, units = "secs")), 2), nsmall = 2),
-      "s"
+      "s",
+      level = "batch"
     )
   }
 
@@ -884,6 +919,7 @@ with_run_finalizer({
     inner_folds = INNER_FOLDS,
     strata_bins = STRATA_BINS,
     metric = METRIC_TO_OPTIMIZE,
+    verbosity = ZINB_VERBOSITY,
     parallel_backend = PARALLEL_BACKEND,
     max_vars = MAX_VARS,
     min_improvement = MIN_IMPROVEMENT,
@@ -909,6 +945,7 @@ with_run_finalizer({
       "Folds" = N_FOLDS,
       "Inner folds" = INNER_FOLDS,
       "Workers" = N_WORKERS,
+      "Verbosity" = ZINB_VERBOSITY,
       "Parallel backend" = PARALLEL_BACKEND,
       "Row filter" = if (nzchar(trimws(ROW_FILTER))) ROW_FILTER else "<none>",
       "Numeric-as-factor max levels" = NUMERIC_AS_FACTOR_MAX_LEVELS,
@@ -920,15 +957,17 @@ with_run_finalizer({
   overview_dt <- dataset_overview(work_dt, target = TARGET, feature_cols = FEATURE_COLS, id_cols = ID_COLS)
   safe_write_csv(overview_dt, file.path(OUTPUT_DIR, "zinb_dataset_overview.csv"))
 
-  log_info("Validating ZINB formulas and transformations on modeling data")
+  zinb_progress_info(NULL, "Validating ZINB formulas and transformations on modeling data", level = "batch")
   validate_zinb_setup(work_dt, TARGET, FEATURE_COLS, ZERO_INFLATION_FORMULA)
 
   predictor_pool <- FEATURE_COLS
   selection_fold_ids <- make_stratified_fold_ids(work_dt[[TARGET]], nfolds = INNER_FOLDS, seed = SEED, n_bins = STRATA_BINS)
   outer_fold_ids <- make_stratified_fold_ids(work_dt[[TARGET]], nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
-  log_info(
+  zinb_progress_info(
+    NULL,
     "Starting full-data ZINB selection for interpretation with ",
-    length(predictor_pool), " predictor(s) and ", INNER_FOLDS, " inner fold(s)"
+    length(predictor_pool), " predictor(s) and ", INNER_FOLDS, " inner fold(s)",
+    level = "batch"
   )
   full_data_selection <- run_forward_selection(
     work_dt = work_dt,
@@ -962,7 +1001,7 @@ with_run_finalizer({
 
   outer_predictions <- list()
   outer_selected_models <- list()
-  log_info("Starting outer CV evaluation across ", N_FOLDS, " fold(s)")
+  zinb_progress_info(NULL, "Starting outer CV evaluation across ", N_FOLDS, " fold(s)", level = "batch")
   for (fold in seq_len(N_FOLDS)) {
     fold_started_at <- Sys.time()
     train_dt <- work_dt[outer_fold_ids != fold]
@@ -971,11 +1010,13 @@ with_run_finalizer({
     if (inner_folds_now < 2L) {
       stop("ZINB inner CV needs at least 2 rows in each outer-training split.", call. = FALSE)
     }
-    log_info(
+    zinb_progress_info(
+      NULL,
       "Outer fold ", fold, "/", N_FOLDS,
       ": train rows=", nrow(train_dt),
       ", test rows=", nrow(test_dt),
-      ", inner folds=", inner_folds_now
+      ", inner folds=", inner_folds_now,
+      level = "batch"
     )
     inner_fold_ids <- make_stratified_fold_ids(
       train_dt[[TARGET]],
@@ -1024,10 +1065,12 @@ with_run_finalizer({
         NA_character_
       }
     )
-    log_info(
+    zinb_progress_info(
+      NULL,
       "Outer fold ", fold, "/", N_FOLDS, " finished in ",
       format(round(as.numeric(difftime(Sys.time(), fold_started_at, units = "secs")), 2), nsmall = 2),
-      "s with formula ", formula_label(fold_selection$final_formula_obj)
+      "s with formula ", formula_label(fold_selection$final_formula_obj),
+      level = "batch"
     )
   }
 
@@ -1052,7 +1095,7 @@ with_run_finalizer({
   print(final_formula_obj)
   .script_ok <- TRUE
 
-  log_info("Refitting final ZINB model on the full dataset for interpretation outputs")
+  zinb_progress_info(NULL, "Refitting final ZINB model on the full dataset for interpretation outputs", level = "batch")
   final_fit <- fit_zinb_model(
     work_dt,
     final_formula_obj,
@@ -1108,6 +1151,7 @@ with_run_finalizer({
     sprintf("- folds: `%s`", N_FOLDS),
     sprintf("- inner_folds: `%s`", INNER_FOLDS),
     sprintf("- workers: `%s`", N_WORKERS),
+    sprintf("- verbosity: `%s`", ZINB_VERBOSITY),
     sprintf("- parallel_backend: `%s`", PARALLEL_BACKEND),
     sprintf("- numeric_as_factor_max_levels: `%s`", NUMERIC_AS_FACTOR_MAX_LEVELS),
     sprintf("- numeric_as_factor_vars: `%s`", if (length(NUMERIC_AS_FACTOR_VARS) > 0) paste(NUMERIC_AS_FACTOR_VARS, collapse = ", ") else "<none>"),
