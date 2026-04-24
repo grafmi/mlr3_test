@@ -64,6 +64,10 @@ STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", config_value(CONFIG
 MAX_VARS <- get_numeric_setting("max-vars", "ZINB_MAX_VARS", config_value(CONFIG, c("zinb", "max_vars")), min_value = 1)
 MIN_IMPROVEMENT <- get_numeric_setting("min-improvement", "ZINB_MIN_IMPROVEMENT", config_value(CONFIG, c("zinb", "min_improvement")), min_value = 0)
 METRIC_TO_OPTIMIZE <- get_setting("metric", "METRIC_TO_OPTIMIZE", config_value(CONFIG, c("zinb", "metric")))
+PARALLEL_BACKEND <- trimws(tolower(get_setting(
+  "parallel-backend", "ZINB_PARALLEL_BACKEND",
+  if (.Platform$OS.type == "unix") "fork" else "psock"
+)))
 N_WORKERS <- get_int_setting(
   "workers", "ZINB_WORKERS",
   get_setting("workers", "N_WORKERS", config_value(CONFIG, c("zinb", "workers"))),
@@ -91,6 +95,11 @@ if (!nzchar(ZERO_INFLATION_FORMULA)) {
 ALLOWED_METRICS <- c("rmse", "mae", "max_error", "mse", "r2", "poisson_deviance", "negloglik")
 if (!METRIC_TO_OPTIMIZE %in% ALLOWED_METRICS) {
   stop("METRIC_TO_OPTIMIZE must be one of: ", paste(ALLOWED_METRICS, collapse = ", "), call. = FALSE)
+}
+
+ALLOWED_PARALLEL_BACKENDS <- c("fork", "psock", "sequential")
+if (!PARALLEL_BACKEND %in% ALLOWED_PARALLEL_BACKENDS) {
+  stop("ZINB parallel-backend must be one of: ", paste(ALLOWED_PARALLEL_BACKENDS, collapse = ", "), call. = FALSE)
 }
 
 # =========================
@@ -707,32 +716,141 @@ evaluate_candidate <- function(spec, work_dt, target, fold_ids, metric) {
 
 evaluate_candidates_parallel <- function(candidate_specs, work_dt, target, fold_ids, metric, workers) {
   if (length(candidate_specs) == 0) return(list())
-  if (workers <= 1) {
+  if (workers <= 1 || identical(PARALLEL_BACKEND, "sequential")) {
     return(lapply(candidate_specs, evaluate_candidate, work_dt = work_dt, target = target, fold_ids = fold_ids, metric = metric))
   }
+  worker_count <- min(workers, length(candidate_specs))
+  batch_size <- max(worker_count, min(length(candidate_specs), worker_count * 2L))
+  batch_ids <- split(seq_along(candidate_specs), ceiling(seq_along(candidate_specs) / batch_size))
 
-  if (.Platform$OS.type != "unix") {
-    message("Parallel ZINB candidate evaluation uses forked workers and is only enabled on Unix-like systems. Falling back to sequential execution.")
-    return(lapply(candidate_specs, evaluate_candidate, work_dt = work_dt, target = target, fold_ids = fold_ids, metric = metric))
+  if (identical(PARALLEL_BACKEND, "fork")) {
+    if (.Platform$OS.type != "unix") {
+      log_info("ZINB parallel-backend=fork is only available on Unix-like systems. Falling back to sequential execution.")
+      return(lapply(candidate_specs, evaluate_candidate, work_dt = work_dt, target = target, fold_ids = fold_ids, metric = metric))
+    }
+
+    log_info(
+      "Evaluating ", length(candidate_specs),
+      " candidate formula(s) in parallel with ",
+      worker_count, " fork worker(s) across ", length(batch_ids), " batch(es)"
+    )
+
+    out <- vector("list", length(batch_ids))
+    for (batch_i in seq_along(batch_ids)) {
+      batch_idx <- batch_ids[[batch_i]]
+      batch_worker_count <- min(worker_count, length(batch_idx))
+      log_info(
+        "Starting candidate batch ", batch_i, "/", length(batch_ids),
+        " covering candidates ", min(batch_idx), "-", max(batch_idx),
+        " with ", batch_worker_count, " fork worker(s)"
+      )
+      batch_started_at <- Sys.time()
+      out[[batch_i]] <- parallel::mclapply(
+        candidate_specs[batch_idx],
+        evaluate_candidate,
+        work_dt = work_dt,
+        target = target,
+        fold_ids = fold_ids,
+        metric = metric,
+        mc.cores = batch_worker_count,
+        mc.preschedule = TRUE,
+        mc.set.seed = TRUE
+      )
+      log_info(
+        "Finished candidate batch ", batch_i, "/", length(batch_ids),
+        " in ",
+        format(round(as.numeric(difftime(Sys.time(), batch_started_at, units = "secs")), 2), nsmall = 2),
+        "s"
+      )
+    }
+
+    return(unlist(out, recursive = FALSE, use.names = FALSE))
   }
 
   log_info(
     "Evaluating ", length(candidate_specs),
     " candidate formula(s) in parallel with ",
-    min(workers, length(candidate_specs)), " worker(s)"
+    worker_count, " PSOCK worker(s) across ", length(batch_ids), " batch(es)"
   )
 
-  parallel::mclapply(
-    candidate_specs,
-    evaluate_candidate,
-    work_dt = work_dt,
-    target = target,
-    fold_ids = fold_ids,
-    metric = metric,
-    mc.cores = min(workers, length(candidate_specs)),
-    mc.preschedule = FALSE,
-    mc.set.seed = TRUE
+  WORK_DT_PARALLEL <- work_dt
+  TARGET_PARALLEL <- target
+  FOLD_IDS_PARALLEL <- fold_ids
+  METRIC_PARALLEL <- metric
+
+  cluster <- tryCatch(
+    parallel::makePSOCKcluster(worker_count),
+    error = function(e) {
+      log_info("Warning: could not start PSOCK workers: ", conditionMessage(e))
+      NULL
+    }
   )
+  if (is.null(cluster)) {
+    log_info("Falling back to sequential candidate evaluation.")
+    return(lapply(candidate_specs, evaluate_candidate, work_dt = work_dt, target = target, fold_ids = fold_ids, metric = metric))
+  }
+  on.exit(parallel::stopCluster(cluster), add = TRUE)
+
+  parallel::clusterEvalQ(cluster, {
+    suppressPackageStartupMessages({
+      library(data.table)
+      library(pscl)
+      library(splines)
+    })
+    NULL
+  })
+  parallel::clusterExport(
+    cluster,
+    varlist = c(
+      "MAIN_PROCESS_PID",
+      "zinb_progress_info",
+      "zinb_fit_attempts",
+      "fit_convergence_reason",
+      "fit_zinb_with_retries",
+      "fit_predict_one_fold",
+      "evaluate_formula_cv",
+      "formula_label",
+      "evaluate_candidate",
+      "reg_metrics",
+      "aggregate_predictions",
+      "WORK_DT_PARALLEL",
+      "TARGET_PARALLEL",
+      "FOLD_IDS_PARALLEL",
+      "METRIC_PARALLEL"
+    ),
+    envir = environment()
+  )
+
+  out <- vector("list", length(batch_ids))
+  for (batch_i in seq_along(batch_ids)) {
+    batch_idx <- batch_ids[[batch_i]]
+    log_info(
+      "Starting candidate batch ", batch_i, "/", length(batch_ids),
+      " covering candidates ", min(batch_idx), "-", max(batch_idx)
+    )
+    batch_started_at <- Sys.time()
+    out[[batch_i]] <- parallel::parLapplyLB(
+      cluster,
+      candidate_specs[batch_idx],
+      function(spec) {
+        evaluate_candidate(
+          spec,
+          work_dt = WORK_DT_PARALLEL,
+          target = TARGET_PARALLEL,
+          fold_ids = FOLD_IDS_PARALLEL,
+          metric = METRIC_PARALLEL
+        )
+      }
+    )
+    log_info(
+      "Finished candidate batch ", batch_i, "/", length(batch_ids),
+      " in ",
+      format(round(as.numeric(difftime(Sys.time(), batch_started_at, units = "secs")), 2), nsmall = 2),
+      "s"
+    )
+  }
+
+  unlist(out, recursive = FALSE, use.names = FALSE)
 }
 
 # =========================
@@ -766,6 +884,7 @@ with_run_finalizer({
     inner_folds = INNER_FOLDS,
     strata_bins = STRATA_BINS,
     metric = METRIC_TO_OPTIMIZE,
+    parallel_backend = PARALLEL_BACKEND,
     max_vars = MAX_VARS,
     min_improvement = MIN_IMPROVEMENT,
     workers = N_WORKERS,
@@ -790,6 +909,7 @@ with_run_finalizer({
       "Folds" = N_FOLDS,
       "Inner folds" = INNER_FOLDS,
       "Workers" = N_WORKERS,
+      "Parallel backend" = PARALLEL_BACKEND,
       "Row filter" = if (nzchar(trimws(ROW_FILTER))) ROW_FILTER else "<none>",
       "Numeric-as-factor max levels" = NUMERIC_AS_FACTOR_MAX_LEVELS,
       "Numeric-as-factor vars" = if (length(NUMERIC_AS_FACTOR_VARS) > 0) paste(NUMERIC_AS_FACTOR_VARS, collapse = ", ") else "<none>",
@@ -988,6 +1108,7 @@ with_run_finalizer({
     sprintf("- folds: `%s`", N_FOLDS),
     sprintf("- inner_folds: `%s`", INNER_FOLDS),
     sprintf("- workers: `%s`", N_WORKERS),
+    sprintf("- parallel_backend: `%s`", PARALLEL_BACKEND),
     sprintf("- numeric_as_factor_max_levels: `%s`", NUMERIC_AS_FACTOR_MAX_LEVELS),
     sprintf("- numeric_as_factor_vars: `%s`", if (length(NUMERIC_AS_FACTOR_VARS) > 0) paste(NUMERIC_AS_FACTOR_VARS, collapse = ", ") else "<none>"),
     sprintf("- optimization_metric: `%s`", METRIC_TO_OPTIMIZE),
