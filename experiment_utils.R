@@ -641,6 +641,8 @@ write_run_manifest <- function(output_dir, script_name, log_state, repo_dir,
   started_at <- if (!is.null(log_state$started_at)) log_state$started_at else Sys.time()
   ended_at <- Sys.time()
   runtime_seconds <- as.numeric(difftime(ended_at, started_at, units = "secs"))
+  cpu_cores_physical <- detect_cpu_cores(logical = FALSE)
+  cpu_cores_logical <- detect_cpu_cores(logical = TRUE)
 
   manifest <- data.table::data.table(
     script_name = script_name,
@@ -653,6 +655,8 @@ write_run_manifest <- function(output_dir, script_name, log_state, repo_dir,
     end_time = format(ended_at, "%Y-%m-%d %H:%M:%S %Z"),
     runtime_seconds = runtime_seconds,
     workers = if (length(n_workers) == 0) NA_real_ else as.numeric(n_workers)[1],
+    cpu_cores_physical = if (length(cpu_cores_physical) == 0) NA_real_ else as.numeric(cpu_cores_physical)[1],
+    cpu_cores_logical = if (length(cpu_cores_logical) == 0) NA_real_ else as.numeric(cpu_cores_logical)[1],
     package_versions = package_versions_string(packages)
   )
 
@@ -968,6 +972,33 @@ timestamp <- function() {
   format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")
 }
 
+detect_cpu_cores <- function(logical = TRUE) {
+  cores <- tryCatch(
+    parallel::detectCores(logical = logical),
+    error = function(e) NA_integer_
+  )
+  if (length(cores) == 0 || is.na(cores) || cores < 1) {
+    return(NA_integer_)
+  }
+  as.integer(cores[[1]])
+}
+
+cpu_core_summary <- function() {
+  physical <- detect_cpu_cores(logical = FALSE)
+  logical <- detect_cpu_cores(logical = TRUE)
+
+  if (!is.na(physical) && !is.na(logical) && physical != logical) {
+    return(sprintf("%s physical / %s logical", physical, logical))
+  }
+  if (!is.na(logical)) {
+    return(sprintf("%s", logical))
+  }
+  if (!is.na(physical)) {
+    return(sprintf("%s", physical))
+  }
+  "unknown"
+}
+
 log_info <- function(...) {
   cat(sprintf("[%s] ", timestamp()), ..., "\n", sep = "")
 }
@@ -984,6 +1015,7 @@ start_logging <- function(output_dir, script_name) {
   log_info("Started ", script_name)
   log_info("Log file: ", normalizePath(log_path, mustWork = FALSE))
   log_info("R version: ", R.version.string)
+  log_info("Detected CPU cores: ", cpu_core_summary())
   log_info("Command: ", paste(commandArgs(), collapse = " "))
 
   list(path = log_path, connection = log_con, started_at = started_at, script_name = script_name)

@@ -303,6 +303,27 @@ faster mlr3 runs and for parallel ZINB candidate evaluation on Linux.
 Using a smaller `inner_folds` than `n_folds` is often a good compromise when
 you want faster tuning runs without changing the outer validation design.
 
+As a practical rule of thumb:
+
+- start with the physical CPU core count, not the number of hardware threads
+- for interactive work, use roughly `cores - 1` so the machine stays responsive
+- for longer batch runs on a dedicated machine, `cores - 1` or `cores` is
+  usually sensible
+- if RAM becomes tight or the data are large, reduce workers before increasing
+  them
+
+For this repository, `CONFIG$experiment$n_workers` controls the mlr3 worker
+count and `CONFIG$zinb$workers` controls the ZINB candidate-evaluation worker
+count. A good starting point on an 8-core machine is often:
+
+```r
+CONFIG$experiment$n_workers <- 7L
+CONFIG$zinb$workers <- 7L
+```
+
+On laptops or when running several jobs at once, values such as `4L` or `6L`
+are often the more stable choice even if more cores are available.
+
 ## Outputs And Tracking
 
 Each script writes its outputs into its configured output directory. Depending

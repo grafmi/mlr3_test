@@ -25,6 +25,8 @@ CONFIG <- list(
     # validation loop unchanged.
     inner_folds = 5L,
     strata_bins = 10L,
+    # Worker processes for mlr3 tuning and resampling. A practical default on
+    # a workstation is often physical CPU cores minus one.
     n_workers = 1L
   ),
 
@@ -154,7 +156,8 @@ CONFIG <- list(
     # Minimum improvement required before a new step is accepted.
     min_improvement = 0.0,
 
-    # Number of worker processes for parallel candidate evaluation on Linux.
+    # Worker processes for parallel candidate evaluation on Linux. A practical
+    # default on a workstation is often physical CPU cores minus one.
     workers = 16L,
 
     # Allowed transformations for numeric predictors during forward selection.
