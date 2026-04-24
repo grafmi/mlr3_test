@@ -38,6 +38,7 @@ ID_COLS <- parse_csv_setting(get_setting(
   "id-cols", "ID_COLS",
   paste(config_value(CONFIG, c("experiment", "id_cols")), collapse = ",")
 ))
+ROW_FILTER <- get_setting("row-filter", "ROW_FILTER", config_value(CONFIG, c("experiment", "row_filter")))
 DATA_PATH <- get_path_setting("data", "MLR3_DATA_PATH", config_value(CONFIG, c("experiment", "data_path")), base_dir = REPO_DIR)
 OUTPUT_DIR <- get_path_setting("output-dir", "VALIDATION_OUTPUT_DIR", config_value(CONFIG, c("validation", "output_dir")), base_dir = REPO_DIR)
 N_FOLDS <- get_int_setting("folds", "N_FOLDS", config_value(CONFIG, c("experiment", "n_folds")), min_value = 2)
@@ -102,7 +103,11 @@ with_run_finalizer({
 
   dataset_check <- tryCatch({
     df <- load_tabular_data_checked(DATA_PATH)
-    work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS, require_count_target = FALSE)
+    work_dt <- prepare_modeling_data(
+      df, TARGET, FEATURE_COLS, ID_COLS,
+      require_count_target = FALSE,
+      row_filter = ROW_FILTER
+    )
 
     checks_local <- list(
       record_check("modeling_data_loads", TRUE, sprintf("%s row(s), %s column(s)", nrow(work_dt), ncol(work_dt))),

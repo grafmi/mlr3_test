@@ -307,11 +307,59 @@ validate_columns <- function(df, target, feature_cols, id_cols = character(0)) {
   }
 }
 
+apply_row_filter_checked <- function(dt, filter_expression, label = "Row filter") {
+  if (!nzchar(trimws(filter_expression))) {
+    return(list(data = data.table::copy(dt), rows_removed = 0L))
+  }
+
+  filter_call <- tryCatch(
+    parse(text = filter_expression)[[1]],
+    error = function(e) {
+      stop(label, " could not be parsed: ", conditionMessage(e), call. = FALSE)
+    }
+  )
+
+  keep_rows <- tryCatch(
+    dt[, eval(filter_call)],
+    error = function(e) {
+      stop(label, " could not be evaluated: ", conditionMessage(e), call. = FALSE)
+    }
+  )
+
+  if (!is.logical(keep_rows)) {
+    stop(label, " must return a logical vector.", call. = FALSE)
+  }
+
+  if (length(keep_rows) == 1) {
+    keep_rows <- rep(keep_rows, nrow(dt))
+  }
+
+  if (length(keep_rows) != nrow(dt)) {
+    stop(
+      label, " must return length 1 or one logical value per row (", nrow(dt), ").",
+      call. = FALSE
+    )
+  }
+
+  if (anyNA(keep_rows)) {
+    stop(label, " returned NA values. Please make the condition explicit.", call. = FALSE)
+  }
+
+  filtered_dt <- dt[keep_rows]
+  list(data = filtered_dt, rows_removed = nrow(dt) - nrow(filtered_dt))
+}
+
 prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(0),
-                                  require_count_target = FALSE) {
+                                  require_count_target = FALSE, row_filter = "") {
   validate_columns(df, target, feature_cols, id_cols)
 
   dt <- data.table::as.data.table(data.table::copy(df))
+  filter_result <- apply_row_filter_checked(dt, row_filter, label = "Modeling row filter")
+  dt <- filter_result$data
+  if (filter_result$rows_removed > 0) {
+    message(sprintf("Dropped %s row(s) via modeling row filter.", filter_result$rows_removed))
+  }
+
   keep_cols <- setdiff(c(target, feature_cols), id_cols)
   dt <- dt[, ..keep_cols]
 

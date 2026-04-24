@@ -121,47 +121,7 @@ apply_keep_drop_columns <- function(dt, keep_cols, drop_cols) {
 }
 
 apply_row_filter <- function(dt, filter_expression) {
-  if (!nzchar(trimws(filter_expression))) {
-    return(list(data = data.table::copy(dt), rows_removed = 0L))
-  }
-
-  filter_call <- tryCatch(
-    parse(text = filter_expression)[[1]],
-    error = function(e) {
-      stop("Could not parse filter expression: ", conditionMessage(e), call. = FALSE)
-    }
-  )
-
-  keep_rows <- tryCatch(
-    dt[, eval(filter_call)],
-    error = function(e) {
-      stop("Could not evaluate filter expression: ", conditionMessage(e), call. = FALSE)
-    }
-  )
-
-  if (!is.logical(keep_rows)) {
-    stop("Filter expression must return a logical vector.", call. = FALSE)
-  }
-
-  if (length(keep_rows) == 1) {
-    keep_rows <- rep(keep_rows, nrow(dt))
-  }
-
-  if (length(keep_rows) != nrow(dt)) {
-    stop(
-      "Filter expression must return length 1 or one logical value per row (",
-      nrow(dt),
-      ").",
-      call. = FALSE
-    )
-  }
-
-  if (anyNA(keep_rows)) {
-    stop("Filter expression returned NA values. Please make the condition explicit.", call. = FALSE)
-  }
-
-  filtered_dt <- dt[keep_rows]
-  list(data = filtered_dt, rows_removed = nrow(dt) - nrow(filtered_dt))
+  apply_row_filter_checked(dt, filter_expression, label = "Filter expression")
 }
 
 drop_missing_rows_if_requested <- function(dt, drop_missing_rows) {

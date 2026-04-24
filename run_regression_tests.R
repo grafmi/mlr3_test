@@ -263,6 +263,55 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
+# 6. validate_repo.R should allow modeling row filters on non-feature columns
+row_filter_fixture_dir <- file.path(TEST_OUTPUT_DIR, "row_filter_fixture")
+unlink(row_filter_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(row_filter_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+row_filter_input <- file.path(row_filter_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = c(1, 2, 3, 4),
+    feature_a = c(10, 20, 30, 40),
+    keep_group = c(1, 0, 1, 0)
+  ),
+  row_filter_input
+)
+
+row_filter_out <- file.path(row_filter_fixture_dir, "outputs")
+row_filter_run <- run_script(
+  "validate_repo.R",
+  args = c(
+    sprintf("--data=%s", row_filter_input),
+    sprintf("--output-dir=%s", row_filter_out),
+    "--target=target",
+    "--features=feature_a"
+  ),
+  env = c("ROW_FILTER=keep_group==1")
+)
+row_filter_checks <- read_csv_if_exists(file.path(row_filter_out, "validation_checks.csv"))
+row_filter_log_path <- file.path(row_filter_out, "validate_repo.log")
+row_filter_log <- if (file.exists(row_filter_log_path)) {
+  paste(readLines(row_filter_log_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+
+row_filter_ok <- row_filter_run$status == 0 &&
+  !is.null(row_filter_checks) &&
+  nrow(row_filter_checks[check == "modeling_data_loads" & ok == TRUE]) == 1 &&
+  grepl("Dropped 2 row\\(s\\) via modeling row filter\\.", row_filter_log)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "validate_repo_allows_row_filter_on_non_feature_columns",
+  row_filter_ok,
+  if (row_filter_ok) {
+    "validate_repo.R accepts row filtering on columns outside FEATURE_COLS"
+  } else {
+    paste("validate_repo.R did not allow row filtering on non-feature columns:", row_filter_run$output)
+  }
+)
+
 results <- rbindlist(tests, fill = TRUE)
 safe_write_csv(results, file.path(TEST_OUTPUT_DIR, "regression_test_results.csv"))
 

@@ -47,6 +47,7 @@ ID_COLS <- parse_csv_setting(get_setting(
   "id-cols", "ID_COLS",
   paste(config_value(CONFIG, c("experiment", "id_cols")), collapse = ",")
 ))
+ROW_FILTER <- get_setting("row-filter", "ROW_FILTER", config_value(CONFIG, c("experiment", "row_filter")))
 
 DATA_PATH <- get_path_setting(
   "data", "MLR3_DATA_PATH",
@@ -416,7 +417,11 @@ LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
 with_run_finalizer({
   set.seed(SEED)
   df <- load_csv_checked(DATA_PATH)
-  work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS, require_count_target = TRUE)
+  work_dt <- prepare_modeling_data(
+    df, TARGET, FEATURE_COLS, ID_COLS,
+    require_count_target = TRUE,
+    row_filter = ROW_FILTER
+  )
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
   resolved_config <- list(
     script_name = SCRIPT_NAME,
@@ -425,6 +430,7 @@ with_run_finalizer({
     target = TARGET,
     feature_cols = FEATURE_COLS,
     id_cols = ID_COLS,
+    row_filter = ROW_FILTER,
     seed = SEED,
     n_folds = N_FOLDS,
     strata_bins = STRATA_BINS,
@@ -440,6 +446,7 @@ with_run_finalizer({
 
   log_info("Using data file: ", normalizePath(DATA_PATH, mustWork = FALSE))
   log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
+  if (nzchar(trimws(ROW_FILTER))) log_info("Using row filter: ", ROW_FILTER)
   log_dataset_overview(
     work_dt,
     target = TARGET,
@@ -449,6 +456,7 @@ with_run_finalizer({
     extra = list(
       "Folds" = N_FOLDS,
       "Workers" = N_WORKERS,
+      "Row filter" = if (nzchar(trimws(ROW_FILTER))) ROW_FILTER else "<none>",
       "Zero-inflation formula" = ZERO_INFLATION_FORMULA,
       "Max vars / min improvement" = paste(MAX_VARS, MIN_IMPROVEMENT, sep = " / ")
     )

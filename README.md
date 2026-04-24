@@ -121,7 +121,8 @@ config.R
 
 The file is grouped so that the most important settings appear first:
 
-- `CONFIG$experiment`: data path, target, features, seed, folds, workers
+- `CONFIG$experiment`: data path, target, features, optional row filter, seed,
+  folds, workers
 - `CONFIG$experiment$inner_folds`: folds used in the inner tuning loop for
   `ranger` and `xgboost`
 - `CONFIG$preprocess`: preprocessing defaults and factor handling
@@ -149,6 +150,10 @@ Absolute paths, repo-relative paths, and `~/...` paths are supported.
 `CONFIG$experiment$id_cols` can be used for identifier columns that exist in the
 dataset but must not be used as predictors, for example customer IDs, policy
 numbers, or technical row IDs.
+
+`CONFIG$experiment$row_filter` is applied before the modeling scripts subset the
+dataset to `target` and `feature_cols`. This allows row filtering on helper
+columns that are present in the dataset but are not modeled as predictors.
 
 For `CONFIG$ranger$search_space` and `CONFIG$xgboost$search_space`, supported
 optional parameters can also be removed or commented out. If a known optional
@@ -252,6 +257,7 @@ Common command-line overrides:
 Rscript preprocess_data.R --input=/path/to/data.rds --formats=csv,rds --filter="n_eintritte >= 0"
 Rscript preprocess_data.R --keep-cols=n_eintritte,prcrank --drop-missing-rows=true
 Rscript preprocess_data.R --chars-to-factors=true --factor-min-count=5
+Rscript mlr3_ranger_tuning.R --row-filter="split == 'train'" --features=prcrank,potenzielle_kunden
 Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5 --tune-evals=20 --workers=4
 Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
 Rscript zinb_stepwise_cv.R --metric=poisson_deviance --max-vars=3 --workers=4
@@ -263,7 +269,7 @@ The same settings can be controlled with environment variables, for example
 `PREPROCESS_OUTPUT_FORMATS`, `PREPROCESS_FILTER`, `PREPROCESS_KEEP_COLS`,
 `PREPROCESS_DROP_COLS`, `PREPROCESS_DROP_MISSING_ROWS`,
 `PREPROCESS_CHARS_TO_FACTORS`, `PREPROCESS_FACTOR_MIN_COUNT`,
-`MLR3_DATA_PATH`, `N_FOLDS`, `INNER_FOLDS`, `TUNE_EVALS`, `N_WORKERS`,
+`MLR3_DATA_PATH`, `ROW_FILTER`, `N_FOLDS`, `INNER_FOLDS`, `TUNE_EVALS`, `N_WORKERS`,
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
 `COMPARISON_OUTPUT_DIR`. ZINB also supports `ZINB_WORKERS`, which takes
 precedence over `N_WORKERS` for that script.

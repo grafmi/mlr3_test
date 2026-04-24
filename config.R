@@ -12,6 +12,10 @@ CONFIG <- list(
     # dataset. Use this for row IDs, customer IDs, policy numbers, or other
     # technical identifiers that should never become predictors.
     id_cols = character(0),
+    # Optional row filter applied before the modeling scripts subset to
+    # target + feature columns. This means the filter may reference helper
+    # columns that are not listed in feature_cols and are never modeled.
+    row_filter = "",
 
     # Reproducibility and CV
     seed = 123L,
