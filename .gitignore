@@ -2,6 +2,8 @@ outputs_ranger/
 outputs_xgb/
 outputs_zinb/
 outputs_model_comparison/
+outputs_regression_tests/
+results/
 .Rhistory
 .RData
 .Rproj.user/
