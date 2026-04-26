@@ -50,8 +50,8 @@ The most relevant outputs per script are:
 ## What The Scripts Do
 
 - `preprocess_data.R`: load data from common R and tabular formats, apply light preprocessing, and write dataset metadata
-- `mlr3_ranger_tuning.R`: nested CV for `ranger` regression with hyperparameter tuning
-- `mlr3_xgb_tuning.R`: nested CV for `xgboost` regression with hyperparameter tuning
+- `mlr3_ranger_tuning.R`: nested CV for `ranger` regression with hyperparameter tuning, optionally repeated across multiple outer-CV draws
+- `mlr3_xgb_tuning.R`: nested CV for `xgboost` regression with hyperparameter tuning, optionally repeated across multiple outer-CV draws
 - `zinb_stepwise_cv.R`: nested-style ZINB selection with inner forward selection and outer CV reporting
 - `compare_best_models.R`: read the best model outputs and create a ranked comparison
 - `validate_repo.R`: quick repository smoke check for packages, config, data, and output paths
@@ -132,6 +132,8 @@ The file is grouped so that the most important settings appear first:
 - `CONFIG$results`: optional run naming plus results-root behavior
 - `CONFIG$experiment$inner_folds`: folds used in the inner tuning loop for
   `ranger` and `xgboost`
+- `CONFIG$experiment$outer_repeats`: optional number of repeated outer-CV runs
+  for `ranger` and `xgboost`; missing values default to `1`
 - `CONFIG$preprocess`: preprocessing defaults and factor handling
 - `CONFIG$ranger`: ranger output directory and tuning defaults
 - `CONFIG$xgboost`: xgboost output directory and tuning defaults
@@ -286,6 +288,7 @@ Rscript preprocess_data.R --sample-rows=500 --sample-seed=123
 Rscript preprocess_data.R --chars-to-factors=true --factor-min-count=5
 Rscript mlr3_ranger_tuning.R --row-filter="split == 'train'" --features=prcrank,potenzielle_kunden
 Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5 --tune-evals=20 --workers=4
+Rscript mlr3_ranger_tuning.R --outer-repeats=3 --folds=5 --inner-folds=3
 Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
 Rscript zinb_stepwise_cv.R --metric=poisson_deviance --max-vars=3 --workers=4
 Rscript zinb_stepwise_cv.R --verbosity=detailed
@@ -300,7 +303,7 @@ The same settings can be controlled with environment variables, for example
 `PREPROCESS_DROP_COLS`, `PREPROCESS_DROP_MISSING_ROWS`,
 `PREPROCESS_SAMPLE_ROWS`, `PREPROCESS_SAMPLE_SEED`,
 `PREPROCESS_CHARS_TO_FACTORS`, `PREPROCESS_FACTOR_MIN_COUNT`,
-`MLR3_DATA_PATH`, `ROW_FILTER`, `N_FOLDS`, `INNER_FOLDS`, `TUNE_EVALS`, `N_WORKERS`,
+`MLR3_DATA_PATH`, `ROW_FILTER`, `N_FOLDS`, `INNER_FOLDS`, `OUTER_REPEATS`, `TUNE_EVALS`, `N_WORKERS`,
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
 `COMPARISON_OUTPUT_DIR`. ZINB also supports `ZINB_WORKERS`, which takes
 precedence over `N_WORKERS` for that script. Additional ZINB-specific overrides
@@ -320,6 +323,9 @@ For reproducibility, the default worker count is `1`. Increase `--workers` for
 faster mlr3 runs and for parallel ZINB candidate evaluation on Linux.
 Using a smaller `inner_folds` than `n_folds` is often a good compromise when
 you want faster tuning runs without changing the outer validation design.
+If you want a more stable validation estimate for `ranger` or `xgboost`,
+increase `outer_repeats`; if it is omitted in the config or on the command
+line, the scripts keep the historical single-repeat behavior.
 
 As a practical rule of thumb:
 
@@ -398,6 +404,11 @@ The per-script reports and transparency files include:
 - `*_model_report.md` or `comparison_report.md`
 - feature importance files for `ranger` and `xgboost` when the final diagnostic
   fit succeeds
+
+For repeated mlr3 runs, `*_cv_predictions.csv`, `*_fold_metrics.csv`, and
+`*_best_params.csv` gain a `repeat` column when `outer_repeats > 1`. The
+`*_overall_metrics.csv` files keep the same schema so downstream comparison
+scripts remain compatible.
 
 Additional ZINB transparency outputs include:
 

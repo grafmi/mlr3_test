@@ -556,8 +556,8 @@ predictions_from_resample <- function(rr) {
   }))
 }
 
-prediction_dt_from_prediction <- function(pred, fold) {
-  data.table::data.table(
+prediction_dt_from_prediction <- function(pred, fold, repeat_id = NULL) {
+  out <- data.table::data.table(
     row_id = pred$row_ids,
     fold = fold,
     truth = pred$truth,
@@ -565,14 +565,26 @@ prediction_dt_from_prediction <- function(pred, fold) {
     error = pred$response - pred$truth,
     abs_error = abs(pred$response - pred$truth)
   )
+  if (!is.null(repeat_id)) {
+    out[, "repeat" := as.integer(repeat_id)]
+    data.table::setcolorder(out, c("repeat", setdiff(names(out), "repeat")))
+  }
+  out
 }
 
 fold_metrics_from_predictions <- function(predictions) {
-  predictions[, reg_metrics(
+  by_cols <- if ("repeat" %in% names(predictions)) c("repeat", "fold") else "fold"
+  out <- predictions[, reg_metrics(
     truth,
     response,
     negloglik = if ("negloglik" %in% names(predictions)) negloglik else NULL
-  ), by = fold][order(fold)]
+  ), by = by_cols]
+  if ("repeat" %in% names(out)) {
+    data.table::setorderv(out, c("repeat", "fold"))
+  } else {
+    data.table::setorder(out, fold)
+  }
+  out
 }
 
 aggregate_predictions <- function(predictions) {
@@ -631,7 +643,7 @@ collect_tuning_results <- function(rr, measure_col = "regr.rmse") {
   out
 }
 
-collect_tuning_result_from_learner <- function(learner, outer_fold, measure_col = "regr.rmse") {
+collect_tuning_result_from_learner <- function(learner, outer_fold, measure_col = "regr.rmse", repeat_id = NULL) {
   tr <- data.table::as.data.table(learner$tuning_result)
 
   if ((nrow(tr) == 0 || ncol(tr) == 0) && !is.null(learner$archive)) {
@@ -647,12 +659,17 @@ collect_tuning_result_from_learner <- function(learner, outer_fold, measure_col 
     tr[, (col) := vapply(.SD[[col]], function(x) paste(as.character(x), collapse = ","), character(1))]
   }
   tr[, outer_fold := outer_fold]
+  if (!is.null(repeat_id)) {
+    tr[, "repeat" := as.integer(repeat_id)]
+    data.table::setcolorder(tr, c("repeat", "outer_fold", setdiff(names(tr), c("repeat", "outer_fold"))))
+  }
   tr
 }
 
 run_autotuner_outer_cv <- function(task, auto_tuner, outer_cv, seed,
                                    progress_prefix = NULL,
-                                   measure_col = "regr.rmse") {
+                                   measure_col = "regr.rmse",
+                                   repeat_id = NULL) {
   n_folds <- outer_cv$iters
   prediction_rows <- vector("list", n_folds)
   tuning_rows <- vector("list", n_folds)
@@ -672,6 +689,7 @@ run_autotuner_outer_cv <- function(task, auto_tuner, outer_cv, seed,
     train_ids <- outer_cv$train_set(fold)
     test_ids <- outer_cv$test_set(fold)
     log_progress(
+      if (!is.null(repeat_id)) paste0("repeat ", repeat_id, ", ") else "",
       "outer fold ", fold, "/", n_folds,
       ": train rows=", length(train_ids),
       ", test rows=", length(test_ids)
@@ -682,11 +700,17 @@ run_autotuner_outer_cv <- function(task, auto_tuner, outer_cv, seed,
     at_fold$train(task, row_ids = train_ids)
     pred <- at_fold$predict(task, row_ids = test_ids)
 
-    prediction_rows[[fold]] <- prediction_dt_from_prediction(pred, fold = fold)
-    tuning_rows[[fold]] <- collect_tuning_result_from_learner(at_fold, outer_fold = fold, measure_col = measure_col)
+    prediction_rows[[fold]] <- prediction_dt_from_prediction(pred, fold = fold, repeat_id = repeat_id)
+    tuning_rows[[fold]] <- collect_tuning_result_from_learner(
+      at_fold,
+      outer_fold = fold,
+      measure_col = measure_col,
+      repeat_id = repeat_id
+    )
     fitted_learners[[fold]] <- at_fold
 
     log_progress(
+      if (!is.null(repeat_id)) paste0("repeat ", repeat_id, ", ") else "",
       "outer fold ", fold, "/", n_folds,
       " finished in ",
       format(round(as.numeric(difftime(Sys.time(), fold_started_at, units = "secs")), 2), nsmall = 2),
@@ -697,13 +721,70 @@ run_autotuner_outer_cv <- function(task, auto_tuner, outer_cv, seed,
   predictions <- data.table::rbindlist(prediction_rows, fill = TRUE)
   tuning_results <- data.table::rbindlist(tuning_rows, fill = TRUE)
   if (nrow(tuning_results) > 0) {
-    data.table::setcolorder(tuning_results, c("outer_fold", setdiff(names(tuning_results), "outer_fold")))
+    if ("repeat" %in% names(tuning_results)) {
+      data.table::setcolorder(tuning_results, c("repeat", "outer_fold", setdiff(names(tuning_results), c("repeat", "outer_fold"))))
+    } else {
+      data.table::setcolorder(tuning_results, c("outer_fold", setdiff(names(tuning_results), "outer_fold")))
+    }
   }
 
   list(
     predictions = predictions,
     tuning_results = tuning_results,
     learners = fitted_learners
+  )
+}
+
+run_repeated_autotuner_outer_cv <- function(task, auto_tuner, target, n_folds,
+                                            outer_repeats = 1L, seed, n_bins = 10,
+                                            progress_prefix = NULL,
+                                            measure_col = "regr.rmse") {
+  if (outer_repeats < 1L) {
+    stop("outer_repeats must be at least 1.", call. = FALSE)
+  }
+
+  predictions_by_repeat <- vector("list", outer_repeats)
+  tuning_by_repeat <- vector("list", outer_repeats)
+  learners_by_repeat <- vector("list", outer_repeats)
+  include_repeat <- outer_repeats > 1L
+
+  for (repeat_idx in seq_len(outer_repeats)) {
+    repeat_seed <- as.integer(seed) + (repeat_idx - 1L) * 1000L
+    outer_cv <- make_stratified_custom_cv(
+      task,
+      target = target,
+      nfolds = n_folds,
+      seed = repeat_seed,
+      n_bins = n_bins
+    )
+    repeat_run <- run_autotuner_outer_cv(
+      task = task,
+      auto_tuner = auto_tuner,
+      outer_cv = outer_cv,
+      seed = repeat_seed,
+      progress_prefix = progress_prefix,
+      measure_col = measure_col,
+      repeat_id = if (include_repeat) repeat_idx else NULL
+    )
+    predictions_by_repeat[[repeat_idx]] <- repeat_run$predictions
+    tuning_by_repeat[[repeat_idx]] <- repeat_run$tuning_results
+    learners_by_repeat[[repeat_idx]] <- repeat_run$learners
+  }
+
+  predictions <- data.table::rbindlist(predictions_by_repeat, fill = TRUE)
+  tuning_results <- data.table::rbindlist(tuning_by_repeat, fill = TRUE)
+  if (nrow(tuning_results) > 0) {
+    if ("repeat" %in% names(tuning_results)) {
+      data.table::setcolorder(tuning_results, c("repeat", "outer_fold", setdiff(names(tuning_results), c("repeat", "outer_fold"))))
+    } else {
+      data.table::setcolorder(tuning_results, c("outer_fold", setdiff(names(tuning_results), "outer_fold")))
+    }
+  }
+
+  list(
+    predictions = predictions,
+    tuning_results = tuning_results,
+    learners = learners_by_repeat
   )
 }
 
@@ -865,7 +946,7 @@ extract_param_values_from_tuning <- function(dt, sort_measure = "regr.rmse") {
   if (sort_measure %in% names(rows)) data.table::setorderv(rows, sort_measure, order = 1L)
   row <- rows[1]
   drop_cols <- c(
-    "outer_fold", "regr.rmse", "warnings", "errors", "batch_nr", "runtime_learners",
+    "repeat", "outer_fold", "regr.rmse", "warnings", "errors", "batch_nr", "runtime_learners",
     "timestamp", "uhash", "learner_param_vals", "x_domain", "resample_result"
   )
   keep_cols <- setdiff(names(row), drop_cols)

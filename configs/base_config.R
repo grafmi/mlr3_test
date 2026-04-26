@@ -20,6 +20,9 @@ CONFIG <- list(
     # Reproducibility and CV
     seed = 123L,
     n_folds = 10L,
+    # Number of repeated outer-CV runs for the mlr3 nested validation. Keep
+    # this at 1 for the historical single-run behavior.
+    outer_repeats = 1L,
     # Number of folds used in the inner tuning loop for mlr3 models. This can
     # be smaller than `n_folds` to speed up tuning while keeping the outer
     # validation loop unchanged.

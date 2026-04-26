@@ -64,6 +64,7 @@ DATA_PATH <- get_path_setting(
 OUTPUT_DIR <- get_path_setting("output-dir", "RANGER_OUTPUT_DIR", config_value(CONFIG, c("ranger", "output_dir")), base_dir = REPO_DIR)
 N_FOLDS <- get_int_setting("folds", "N_FOLDS", config_value(CONFIG, c("experiment", "n_folds")), min_value = 2)
 INNER_FOLDS <- get_int_setting("inner-folds", "INNER_FOLDS", config_value(CONFIG, c("experiment", "inner_folds")), min_value = 2)
+OUTER_REPEATS <- get_int_setting("outer-repeats", "OUTER_REPEATS", config_value_or(CONFIG, c("experiment", "outer_repeats"), 1L), min_value = 1)
 SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
 TUNE_EVALS <- get_int_setting("tune-evals", "TUNE_EVALS", config_value(CONFIG, c("ranger", "tune_evals")), min_value = 1)
 STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", config_value(CONFIG, c("experiment", "strata_bins")), min_value = 2)
@@ -102,6 +103,7 @@ with_run_finalizer({
     seed = SEED,
     n_folds = N_FOLDS,
     inner_folds = INNER_FOLDS,
+    outer_repeats = OUTER_REPEATS,
     strata_bins = STRATA_BINS,
     tune_evals = TUNE_EVALS,
     n_workers = N_WORKERS
@@ -119,6 +121,7 @@ with_run_finalizer({
     id_cols = ID_COLS,
     metric = "rmse",
     extra = list(
+      "Outer repeats" = OUTER_REPEATS,
       "Outer folds / inner folds" = paste(N_FOLDS, INNER_FOLDS, sep = " / "),
       "Tuning evals" = TUNE_EVALS,
       "Workers" = N_WORKERS
@@ -129,7 +132,6 @@ with_run_finalizer({
 
   backend <- add_regression_stratum(as.data.frame(work_dt), target = TARGET, n_bins = STRATA_BINS)
   task <- make_regr_task("ranger_regression", backend = backend, target = TARGET)
-  outer_cv <- make_stratified_custom_cv(task, target = TARGET, nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
 
   learner <- lrn(
     "regr.ranger",
@@ -182,11 +184,14 @@ with_run_finalizer({
     store_models = FALSE
   )
 
-  cv_run <- run_autotuner_outer_cv(
+  cv_run <- run_repeated_autotuner_outer_cv(
     task = task,
     auto_tuner = at,
-    outer_cv = outer_cv$clone(deep = TRUE),
+    target = TARGET,
+    n_folds = N_FOLDS,
+    outer_repeats = OUTER_REPEATS,
     seed = SEED,
+    n_bins = STRATA_BINS,
     progress_prefix = "Ranger"
   )
   predictions <- cv_run$predictions
@@ -232,6 +237,7 @@ with_run_finalizer({
     sprintf("- seed: `%s`", SEED),
     sprintf("- outer_folds: `%s`", N_FOLDS),
     sprintf("- inner_folds: `%s`", INNER_FOLDS),
+    sprintf("- outer_repeats: `%s`", OUTER_REPEATS),
     sprintf("- tune_evals: `%s`", TUNE_EVALS),
     sprintf("- workers: `%s`", N_WORKERS),
     "",

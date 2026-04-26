@@ -135,7 +135,46 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 3. compare_best_models.R should report availability for missing outputs
+# 3. Repeated outer CV should add repeat metadata without changing overall metrics
+ranger_repeat_out <- file.path(TEST_OUTPUT_DIR, "ranger_repeated_run")
+unlink(ranger_repeat_out, recursive = TRUE, force = TRUE)
+ranger_repeat_run <- run_script(
+  "mlr3_ranger_tuning.R",
+  args = c(
+    sprintf("--output-dir=%s", ranger_repeat_out),
+    "--folds=2",
+    "--inner-folds=2",
+    "--outer-repeats=2",
+    "--tune-evals=2",
+    "--workers=1"
+  )
+)
+ranger_repeat_predictions <- read_csv_if_exists(file.path(ranger_repeat_out, "ranger_cv_predictions.csv"))
+ranger_repeat_fold_metrics <- read_csv_if_exists(file.path(ranger_repeat_out, "ranger_fold_metrics.csv"))
+ranger_repeat_best_params <- read_csv_if_exists(file.path(ranger_repeat_out, "ranger_best_params.csv"))
+ranger_repeat_overall_metrics <- read_csv_if_exists(file.path(ranger_repeat_out, "ranger_overall_metrics.csv"))
+ranger_repeat_ok <- ranger_repeat_run$status == 0 &&
+  !is.null(ranger_repeat_predictions) &&
+  !is.null(ranger_repeat_fold_metrics) &&
+  !is.null(ranger_repeat_best_params) &&
+  !is.null(ranger_repeat_overall_metrics) &&
+  all(c("repeat", "fold") %in% names(ranger_repeat_fold_metrics)) &&
+  "repeat" %in% names(ranger_repeat_predictions) &&
+  "repeat" %in% names(ranger_repeat_best_params) &&
+  !("repeat" %in% names(ranger_repeat_overall_metrics)) &&
+  length(unique(ranger_repeat_predictions[["repeat"]])) == 2L
+
+tests[[length(tests) + 1L]] <- record_test(
+  "repeated_outer_cv_writes_repeat_metadata",
+  ranger_repeat_ok,
+  if (ranger_repeat_ok) {
+    "repeated outer CV added repeat metadata while keeping overall metrics schema stable"
+  } else {
+    paste("repeated ranger run did not produce expected repeat-aware outputs:", ranger_repeat_run$output)
+  }
+)
+
+# 4. compare_best_models.R should report availability for missing outputs
 compare_fixture_root <- file.path(TEST_OUTPUT_DIR, "compare_fixture")
 unlink(compare_fixture_root, recursive = TRUE, force = TRUE)
 dir.create(file.path(compare_fixture_root, "outputs_ranger"), recursive = TRUE, showWarnings = FALSE)
@@ -153,7 +192,7 @@ safe_write_csv(
   file.path(compare_fixture_root, "outputs_ranger", "ranger_overall_metrics.csv")
 )
 safe_write_csv(
-  data.table(num.trees = 500L, regr.rmse = 1.2),
+  data.table("repeat" = 1L, num.trees = 500L, regr.rmse = 1.2),
   file.path(compare_fixture_root, "outputs_ranger", "ranger_best_params.csv")
 )
 
@@ -183,7 +222,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 4. write_run_summary.R should create summary files from run manifests
+# 5. write_run_summary.R should create summary files from run manifests
 summary_fixture_root <- file.path(TEST_OUTPUT_DIR, "run_summary_fixture")
 unlink(summary_fixture_root, recursive = TRUE, force = TRUE)
 dir.create(file.path(summary_fixture_root, "outputs_ranger"), recursive = TRUE, showWarnings = FALSE)
