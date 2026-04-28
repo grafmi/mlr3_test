@@ -27,6 +27,7 @@ zinb_max_features <- length(features)
 zinb_min_improvement <- 0
 zinb_numeric_transforms <- c("raw", "sqrt", "log1p", "ns2", "factor")
 zinb_factor_numeric_max_levels <- 12L
+zinb_zero <- "1"
 cores <- parallel::detectCores(logical = FALSE)
 workers <- max(1L, min(4L, ifelse(is.na(cores), 2L, cores - 1L)))
 measures <- msrs(c("regr.rmse", "regr.mae", "regr.rsq"))
@@ -132,28 +133,33 @@ fit_predict_zinb <- function(train_dt, test_dt, terms, zero = "1") {
 }
 
 rmse <- function(truth, pred) sqrt(mean((pred - truth)^2))
+r2_score <- function(truth, pred) {
+  sst <- sum((truth - mean(truth))^2)
+  if (isTRUE(all.equal(sst, 0))) return(NA_real_)
+  1 - sum((pred - truth)^2) / sst
+}
 
-score_zinb_terms <- function(work_dt, terms, folds, seed) {
+score_zinb_terms <- function(work_dt, terms, folds, seed, zero = zinb_zero) {
   fold_id <- make_stratified_fold_id(work_dt$.stratum, folds, seed)
   pred <- rep(NA_real_, nrow(work_dt))
   for (fold in seq_len(folds)) {
-    fit <- fit_predict_zinb(work_dt[fold_id != fold], work_dt[fold_id == fold], terms)
+    fit <- fit_predict_zinb(work_dt[fold_id != fold], work_dt[fold_id == fold], terms, zero = zero)
     if (is.null(fit)) return(Inf)
     pred[fold_id == fold] <- fit$pred
   }
   rmse(work_dt[[target]], pred)
 }
 
-select_zinb_terms <- function(work_dt, pool, folds, seed) {
+select_zinb_terms <- function(work_dt, pool, folds, seed, zero = zinb_zero) {
   candidates <- make_zinb_candidates(work_dt, pool)
   selected_terms <- character()
   selected_vars <- character()
-  best <- score_zinb_terms(work_dt, selected_terms, folds, seed)
+  best <- score_zinb_terms(work_dt, selected_terms, folds, seed, zero = zero)
   # Greedy Forward Selection: fuege den Term hinzu, der den inner-CV-RMSE am staerksten senkt.
   while (length(selected_vars) < min(zinb_max_features, length(pool))) {
     remaining <- candidates[!var %in% selected_vars]
     scores <- sapply(seq_len(nrow(remaining)), function(i) {
-      score_zinb_terms(work_dt, c(selected_terms, remaining$term[[i]]), folds, seed)
+      score_zinb_terms(work_dt, c(selected_terms, remaining$term[[i]]), folds, seed, zero = zero)
     })
     if (!length(scores) || all(!is.finite(scores))) break
     pick <- which.min(scores)
@@ -171,10 +177,11 @@ run_zinb_nested_cv <- function() {
   rows <- vector("list", outer_folds)
   selected_rows <- vector("list", outer_folds)
   for (fold in seq_len(outer_folds)) {
+    message("  ZINB outer fold ", fold, "/", outer_folds)
     train_dt <- dt[outer_fold_id != fold]
     test_dt <- dt[outer_fold_id == fold]
-    selected <- select_zinb_terms(train_dt, features, inner_folds, seed + fold)
-    fit <- fit_predict_zinb(train_dt, test_dt, selected$terms)
+    selected <- select_zinb_terms(train_dt, features, inner_folds, seed + fold, zero = zinb_zero)
+    fit <- fit_predict_zinb(train_dt, test_dt, selected$terms, zero = zinb_zero)
     if (is.null(fit)) stop("ZINB outer fold ", fold, " failed.", call. = FALSE)
     rows[[fold]] <- data.table(row_id = which(outer_fold_id == fold), truth = test_dt[[target]], response = fit$pred)
     selected_rows[[fold]] <- data.table(
@@ -187,7 +194,7 @@ run_zinb_nested_cv <- function() {
   score <- data.table(
     regr.rmse = rmse(pred$truth, pred$response),
     regr.mae = mean(abs(pred$response - pred$truth)),
-    regr.rsq = 1 - sum((pred$response - pred$truth)^2) / sum((pred$truth - mean(pred$truth))^2)
+    regr.rsq = r2_score(pred$truth, pred$response)
   )
   list(score = score, predictions = pred, best_params = rbindlist(selected_rows))
 }
