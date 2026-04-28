@@ -7,4 +7,5 @@ results/
 .Rhistory
 .RData
 .Rproj.user/
+.lintr
 .codex

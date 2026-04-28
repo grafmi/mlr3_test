@@ -30,6 +30,7 @@ zinb_factor_numeric_max_levels <- 12L
 zinb_zero <- "1"
 cores <- parallel::detectCores(logical = FALSE)
 workers <- max(1L, min(4L, ifelse(is.na(cores), 2L, cores - 1L)))
+learner_threads <- 1L # Bei tune_evals=1 ggf. workers <- 1 und learner_threads > 1 setzen.
 measures <- msrs(c("regr.rmse", "regr.mae", "regr.rsq"))
 
 future::plan(future::multisession, workers = workers) # RStudio-freundlich; Learner-Threads bleiben unten bei 1.
@@ -77,8 +78,8 @@ tasks <- list(
 for (task in tasks) task$set_col_roles(".stratum", roles = "stratum")
 
 learners <- list(
-  ranger = lrn("regr.ranger", predict_type = "response", num.threads = 1),
-  xgb = lrn("regr.xgboost", predict_type = "response", objective = "reg:squarederror", nthread = 1)
+  ranger = lrn("regr.ranger", predict_type = "response", num.threads = learner_threads),
+  xgb = lrn("regr.xgboost", predict_type = "response", objective = "reg:squarederror", nthread = learner_threads)
 )
 
 check_zinb_package <- function() {
