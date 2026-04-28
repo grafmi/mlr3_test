@@ -22,8 +22,11 @@ inner_folds <- 5
 tune_evals <- 10
 strata_bins <- 10
 run_zinb <- FALSE
+# ZINB waehlt optional Count-Model-Terme per innerer Forward Selection.
 zinb_max_features <- length(features)
 zinb_min_improvement <- 0
+zinb_numeric_transforms <- c("raw", "sqrt", "log1p", "ns2", "factor")
+zinb_factor_numeric_max_levels <- 12L
 cores <- parallel::detectCores(logical = FALSE)
 workers <- max(1L, min(4L, ifelse(is.na(cores), 2L, cores - 1L)))
 measures <- msrs(c("regr.rmse", "regr.mae", "regr.rsq"))
@@ -40,6 +43,7 @@ dt <- na.omit(as.data.table(dt)[, c(target, features), with = FALSE])
 dt[, .stratum := cut(rank(get(target), ties.method = "average"), breaks = strata_bins, include.lowest = TRUE)]
 set.seed(seed)
 
+# Zielbasierte Stratifizierung: haelt die Verteilung von `target` in den Folds aehnlicher.
 make_stratified_fold_id <- function(strata, folds, seed) {
   set.seed(seed)
   fold_id <- integer(length(strata))
@@ -80,16 +84,40 @@ check_zinb_package <- function() {
   if (!requireNamespace("pscl", quietly = TRUE)) stop("Package `pscl` is needed for ZINB.", call. = FALSE)
 }
 
-zinb_formula <- function(vars, zero = "1") {
-  rhs <- if (length(vars) > 0) paste(vars, collapse = " + ") else "1"
+# Aus Feature-Namen werden ZINB-Term-Kandidaten; pro Originalvariable wird spaeter max. ein Term gewaehlt.
+make_zinb_candidates <- function(work_dt, pool) {
+  rbindlist(lapply(pool, function(v) {
+    x <- work_dt[[v]]
+    if (!is.numeric(x)) return(data.table(var = v, transform = "raw", term = v))
+    out <- list(data.table(var = v, transform = "raw", term = v))
+    if ("sqrt" %in% zinb_numeric_transforms && all(x >= 0, na.rm = TRUE)) {
+      out[[length(out) + 1L]] <- data.table(var = v, transform = "sqrt", term = sprintf("sqrt(%s)", v))
+    }
+    if ("log1p" %in% zinb_numeric_transforms && all(x > -1, na.rm = TRUE)) {
+      out[[length(out) + 1L]] <- data.table(var = v, transform = "log1p", term = sprintf("log1p(%s)", v))
+    }
+    if ("ns2" %in% zinb_numeric_transforms && length(unique(x)) >= 4L) {
+      out[[length(out) + 1L]] <- data.table(var = v, transform = "ns2", term = sprintf("splines::ns(%s, df = 2)", v))
+    }
+    if ("factor" %in% zinb_numeric_transforms && length(unique(x)) <= zinb_factor_numeric_max_levels) {
+      out[[length(out) + 1L]] <- data.table(var = v, transform = "factor", term = sprintf("factor(%s)", v))
+    }
+    rbindlist(out)
+  }))
+}
+
+# ZINB nutzt Standard-Fit-Parameter; optimiert wird hier nur die Count-Model-Formel.
+zinb_formula <- function(terms, zero = "1") {
+  rhs <- if (length(terms) > 0) paste(terms, collapse = " + ") else "1"
   as.formula(sprintf("%s ~ %s | %s", target, rhs, zero))
 }
 
-fit_predict_zinb <- function(train_dt, test_dt, vars, zero = "1") {
+# Rueckgabe NULL bedeutet: Fit oder Prediction war unbrauchbar, Kandidat wird verworfen.
+fit_predict_zinb <- function(train_dt, test_dt, terms, zero = "1") {
   fit_warnings <- character()
   fit <- tryCatch(
     withCallingHandlers(
-      pscl::zeroinfl(zinb_formula(vars, zero), data = train_dt, dist = "negbin", EM = TRUE),
+      pscl::zeroinfl(zinb_formula(terms, zero), data = train_dt, dist = "negbin", EM = TRUE),
       warning = function(w) {
         fit_warnings <<- c(fit_warnings, conditionMessage(w))
         invokeRestart("muffleWarning")
@@ -105,32 +133,39 @@ fit_predict_zinb <- function(train_dt, test_dt, vars, zero = "1") {
 
 rmse <- function(truth, pred) sqrt(mean((pred - truth)^2))
 
-score_zinb_vars <- function(work_dt, vars, folds, seed) {
+score_zinb_terms <- function(work_dt, terms, folds, seed) {
   fold_id <- make_stratified_fold_id(work_dt$.stratum, folds, seed)
   pred <- rep(NA_real_, nrow(work_dt))
   for (fold in seq_len(folds)) {
-    fit <- fit_predict_zinb(work_dt[fold_id != fold], work_dt[fold_id == fold], vars)
+    fit <- fit_predict_zinb(work_dt[fold_id != fold], work_dt[fold_id == fold], terms)
     if (is.null(fit)) return(Inf)
     pred[fold_id == fold] <- fit$pred
   }
   rmse(work_dt[[target]], pred)
 }
 
-select_zinb_features <- function(work_dt, pool, folds, seed) {
-  selected <- character()
-  best <- score_zinb_vars(work_dt, selected, folds, seed)
-  while (length(selected) < min(zinb_max_features, length(pool))) {
-    remaining <- setdiff(pool, selected)
-    scores <- sapply(remaining, function(v) score_zinb_vars(work_dt, c(selected, v), folds, seed))
+select_zinb_terms <- function(work_dt, pool, folds, seed) {
+  candidates <- make_zinb_candidates(work_dt, pool)
+  selected_terms <- character()
+  selected_vars <- character()
+  best <- score_zinb_terms(work_dt, selected_terms, folds, seed)
+  # Greedy Forward Selection: fuege den Term hinzu, der den inner-CV-RMSE am staerksten senkt.
+  while (length(selected_vars) < min(zinb_max_features, length(pool))) {
+    remaining <- candidates[!var %in% selected_vars]
+    scores <- sapply(seq_len(nrow(remaining)), function(i) {
+      score_zinb_terms(work_dt, c(selected_terms, remaining$term[[i]]), folds, seed)
+    })
     if (!length(scores) || all(!is.finite(scores))) break
-    pick <- names(which.min(scores))
+    pick <- which.min(scores)
     if (best - scores[[pick]] <= zinb_min_improvement) break
-    selected <- c(selected, pick)
+    selected_terms <- c(selected_terms, remaining$term[[pick]])
+    selected_vars <- c(selected_vars, remaining$var[[pick]])
     best <- scores[[pick]]
   }
-  selected
+  list(terms = selected_terms, vars = selected_vars)
 }
 
+# ZINB bleibt nested: Term-Auswahl nur im Outer-Train, Bewertung nur im Outer-Test.
 run_zinb_nested_cv <- function() {
   outer_fold_id <- make_stratified_fold_id(dt$.stratum, outer_folds, seed)
   rows <- vector("list", outer_folds)
@@ -138,11 +173,15 @@ run_zinb_nested_cv <- function() {
   for (fold in seq_len(outer_folds)) {
     train_dt <- dt[outer_fold_id != fold]
     test_dt <- dt[outer_fold_id == fold]
-    selected <- select_zinb_features(train_dt, features, inner_folds, seed + fold)
-    fit <- fit_predict_zinb(train_dt, test_dt, selected)
+    selected <- select_zinb_terms(train_dt, features, inner_folds, seed + fold)
+    fit <- fit_predict_zinb(train_dt, test_dt, selected$terms)
     if (is.null(fit)) stop("ZINB outer fold ", fold, " failed.", call. = FALSE)
     rows[[fold]] <- data.table(row_id = which(outer_fold_id == fold), truth = test_dt[[target]], response = fit$pred)
-    selected_rows[[fold]] <- data.table(outer_fold = fold, selected_features = paste(selected, collapse = ", "))
+    selected_rows[[fold]] <- data.table(
+      outer_fold = fold,
+      selected_features = paste(selected$vars, collapse = ", "),
+      selected_terms = paste(selected$terms, collapse = " + ")
+    )
   }
   pred <- rbindlist(rows)
   score <- data.table(
@@ -157,6 +196,7 @@ if (run_zinb) check_zinb_package()
 
 spaces <- list(
   ranger = ps(
+    # Schlanker Search Space: zentrale Hebel aktiv, weniger zentrale Parameter bleiben Defaults.
     # num.trees = p_int(300, 1500),
     mtry = p_int(1, length(tasks$ranger$feature_names)),
     min.node.size = p_int(1, 25),
@@ -164,6 +204,7 @@ spaces <- list(
     # replace = p_lgl()
   ),
   xgb = ps(
+    # XGBoost: Komplexitaet, Lernrate und Sampling tunen; Regularisierung bleibt Default.
     nrounds = p_int(50, 800),
     eta = p_dbl(0.01, 0.30),
     max_depth = p_int(2, 8),
@@ -189,6 +230,7 @@ results <- lapply(model_names, function(model) {
   learner <- learners[[model]]
   space <- spaces[[model]]
   if (!is.null(space)) {
+    # Inner CV waehlt Hyperparameter; Outer CV bewertet den getunten Workflow.
     learner <- auto_tuner(
       learner = learner,
       resampling = rsmp("cv", folds = inner_folds),
@@ -200,6 +242,7 @@ results <- lapply(model_names, function(model) {
     )
   }
 
+  # Explizite Outer-Folds machen den Modellvergleich kontrolliert und reproduzierbar.
   outer_cv <- make_stratified_outer_cv(tasks[[model]], strata = dt$.stratum, folds = outer_folds, seed = seed)
   rr <- resample(tasks[[model]], learner, outer_cv, store_models = TRUE)
   pred <- rr$prediction()
@@ -217,6 +260,7 @@ names(results) <- model_names
 scores <- rbindlist(lapply(names(results), function(m) cbind(model = m, results[[m]]$score)), fill = TRUE)
 print(scores)
 
+# Kleiner Modellvergleich: niedrigster Outer-CV-RMSE gewinnt.
 comparison <- copy(scores)[order(regr.rmse)]
 comparison[, rank_rmse := seq_len(.N)]
 setcolorder(comparison, c("rank_rmse", "model", setdiff(names(comparison), c("rank_rmse", "model"))))
