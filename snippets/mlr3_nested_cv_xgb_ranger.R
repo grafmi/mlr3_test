@@ -29,8 +29,10 @@ zinb_numeric_transforms <- c("raw", "sqrt", "log1p", "ns2", "factor")
 zinb_factor_numeric_max_levels <- 12L
 zinb_zero <- "1"
 cores <- parallel::detectCores(logical = FALSE)
-workers <- max(1L, min(4L, ifelse(is.na(cores), 2L, cores - 1L)))
+# Viele Tuning-Jobs: learner_threads <- 1 und mehr workers. Wenige Jobs: learner_threads erhoehen.
 learner_threads <- 1L # Bei tune_evals=1 ggf. workers <- 1 und learner_threads > 1 setzen.
+usable_cores <- max(1L, ifelse(is.na(cores), 2L, cores - 1L))
+workers <- max(1L, ceiling(usable_cores / learner_threads))
 measures <- msrs(c("regr.rmse", "regr.mae", "regr.rsq"))
 
 future::plan(future::multisession, workers = workers) # RStudio-freundlich; Learner-Threads bleiben unten bei 1.
