@@ -81,6 +81,20 @@ validate_zero_formula_rhs <- function(rhs, dt) {
 LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
 with_run_finalizer({
   if (!is.na(RUN_NAME)) log_info("Run name: ", RUN_NAME)
+  resolved_config <- list(
+    script_name = SCRIPT_NAME,
+    run_name = RUN_NAME,
+    data_path = normalizePath(DATA_PATH, mustWork = FALSE),
+    output_dir = normalizePath(OUTPUT_DIR, mustWork = FALSE),
+    target = TARGET,
+    feature_cols = FEATURE_COLS,
+    id_cols = ID_COLS,
+    row_filter = ROW_FILTER,
+    n_folds = N_FOLDS,
+    inner_folds = INNER_FOLDS,
+    missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
+  )
+  write_config_snapshot(OUTPUT_DIR, resolved_config)
   checks <- list()
 
   missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
@@ -129,6 +143,8 @@ with_run_finalizer({
       record_check("modeling_data_loads", TRUE, sprintf("%s row(s), %s column(s)", nrow(work_dt), ncol(work_dt))),
       record_check("target_and_features_present", TRUE, paste(c(TARGET, FEATURE_COLS), collapse = ", "))
     )
+    warn_if_small_cv_folds(nrow(work_dt), N_FOLDS, context = "modeling data")
+    warn_if_low_information_features(work_dt, FEATURE_COLS, context = "modeling data")
 
     if (!identical(zero_formula, "same_as_count")) {
       validate_zero_formula_rhs(zero_formula, work_dt)

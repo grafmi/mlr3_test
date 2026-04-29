@@ -424,6 +424,82 @@ warn_if_missing_drop_high <- function(rows_before, rows_dropped, warn_fraction =
   invisible(NULL)
 }
 
+warn_if_small_cv_folds <- function(n_rows, n_folds, min_rows_per_fold = 10L,
+                                   context = "modeling data") {
+  if (is.na(n_rows) || is.na(n_folds) || n_folds < 2L) return(invisible(NULL))
+  fold_size_floor <- floor(n_rows / n_folds)
+  fold_size_ceiling <- ceiling(n_rows / n_folds)
+  if (fold_size_floor < min_rows_per_fold) {
+    log_info(
+      "Warning: Small validation folds for ",
+      context,
+      " (",
+      n_rows,
+      " row(s), ",
+      n_folds,
+      " fold(s), approximately ",
+      fold_size_floor,
+      "-",
+      fold_size_ceiling,
+      " row(s) per fold). CV metrics may be unstable after filtering."
+    )
+  }
+
+  invisible(NULL)
+}
+
+warn_if_low_information_features <- function(dt, feature_cols, near_constant_unique_max = 2L,
+                                             near_constant_dominance = 0.95,
+                                             context = "modeling data") {
+  feature_cols <- intersect(feature_cols, names(dt))
+  if (length(feature_cols) == 0 || nrow(dt) == 0) return(invisible(NULL))
+
+  constant_features <- character(0)
+  near_constant_features <- character(0)
+
+  for (col in feature_cols) {
+    values <- dt[[col]]
+    non_missing <- values[!is.na(values)]
+    n_unique <- data.table::uniqueN(non_missing)
+    if (n_unique <= 1L) {
+      constant_features <- c(constant_features, col)
+      next
+    }
+
+    if (is.numeric(values) && n_unique <= near_constant_unique_max && length(non_missing) > 0) {
+      counts <- table(non_missing, useNA = "no")
+      dominance <- max(counts) / length(non_missing)
+      if (dominance >= near_constant_dominance) {
+        near_constant_features <- c(
+          near_constant_features,
+          sprintf("%s (%s unique, dominant value %.1f%%)", col, n_unique, 100 * dominance)
+        )
+      }
+    }
+  }
+
+  if (length(constant_features) > 0) {
+    log_info(
+      "Warning: Constant feature(s) found in ",
+      context,
+      ": ",
+      paste(constant_features, collapse = ", "),
+      ". They add no predictive information and may make model diagnostics harder to interpret."
+    )
+  }
+  if (length(near_constant_features) > 0) {
+    log_info(
+      "Warning: Near-constant numeric feature(s) found in ",
+      context,
+      ": ",
+      paste(near_constant_features, collapse = ", "),
+      ". Check whether these predictors are useful after filtering."
+    )
+  }
+
+  invisible(NULL)
+}
+
 formula_referenced_columns <- function(rhs, label = "Formula") {
   rhs <- trimws(rhs)
   if (!nzchar(rhs)) return(character(0))

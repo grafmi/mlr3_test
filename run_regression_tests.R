@@ -87,30 +87,32 @@ run_script <- function(script_name, args = character(0), env = character(0), wor
 
 tests <- list()
 
-# 1. validate_repo.R should succeed and write expected artifacts
+# validate_repo.R should succeed and write expected artifacts
 validate_out <- file.path(TEST_OUTPUT_DIR, "validate_repo")
 unlink(validate_out, recursive = TRUE, force = TRUE)
 validate_run <- run_script("validate_repo.R", args = c(sprintf("--output-dir=%s", validate_out)))
 validate_checks_path <- file.path(validate_out, "validation_checks.csv")
 validate_log_path <- file.path(validate_out, "validate_repo.log")
 validate_manifest_path <- file.path(validate_out, "run_manifest.csv")
+validate_config_path <- file.path(validate_out, "resolved_config.rds")
 
 validate_ok <- validate_run$status == 0 &&
   file.exists(validate_checks_path) &&
   file.exists(validate_log_path) &&
-  file.exists(validate_manifest_path)
+  file.exists(validate_manifest_path) &&
+  file.exists(validate_config_path)
 
 tests[[length(tests) + 1L]] <- record_test(
   "validate_repo_success",
   validate_ok,
   if (validate_ok) {
-    "validate_repo.R completed and wrote checks, log, and manifest"
+    "validate_repo.R completed and wrote checks, log, manifest, and config snapshot"
   } else {
     paste("validate_repo.R failed:", validate_run$output)
   }
 )
 
-# 2. run_all.sh should validate before running model scripts
+# run_all.sh should validate before running model scripts
 run_all_lines <- readLines(file.path(REPO_DIR, "run_all.sh"), warn = FALSE)
 validation_step <- grep("Running repository validation", run_all_lines, fixed = TRUE)
 ranger_step <- grep("Running ranger tuning", run_all_lines, fixed = TRUE)
@@ -129,7 +131,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 3. Failed ranger run should still write log and manifest
+# Failed ranger run should still write log and manifest
 ranger_fail_out <- file.path(TEST_OUTPUT_DIR, "ranger_failed_run")
 unlink(ranger_fail_out, recursive = TRUE, force = TRUE)
 ranger_fail_run <- run_script(
@@ -154,7 +156,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 4. Repeated outer CV should add repeat metadata without changing overall metrics
+# Repeated outer CV should add repeat metadata without changing overall metrics
 ranger_repeat_out <- file.path(TEST_OUTPUT_DIR, "ranger_repeated_run")
 unlink(ranger_repeat_out, recursive = TRUE, force = TRUE)
 ranger_repeat_run <- run_script(
@@ -193,7 +195,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 5. validate_repo.R should warn when missing-value row drops exceed the threshold
+# validate_repo.R should warn when missing-value row drops exceed the threshold
 missing_warn_fixture_dir <- file.path(TEST_OUTPUT_DIR, "missing_warn_fixture")
 unlink(missing_warn_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(missing_warn_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -237,7 +239,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 6. validate_repo.R should warn when ID columns have repeated values
+# validate_repo.R should warn when ID columns have repeated values
 duplicate_id_fixture_dir <- file.path(TEST_OUTPUT_DIR, "duplicate_id_fixture")
 unlink(duplicate_id_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(duplicate_id_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -283,7 +285,99 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 7. mlr3_xgb_tuning.R should run with factor features using fold-local encoding
+# validate_repo.R should warn when validation folds are small
+small_fold_fixture_dir <- file.path(TEST_OUTPUT_DIR, "small_fold_fixture")
+unlink(small_fold_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(small_fold_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+small_fold_input <- file.path(small_fold_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = seq_len(20),
+    feature_a = seq_len(20)
+  ),
+  small_fold_input
+)
+
+small_fold_out <- file.path(small_fold_fixture_dir, "outputs")
+small_fold_run <- run_script(
+  "validate_repo.R",
+  args = c(
+    sprintf("--data=%s", small_fold_input),
+    sprintf("--output-dir=%s", small_fold_out),
+    "--target=target",
+    "--features=feature_a",
+    "--folds=10",
+    "--inner-folds=5"
+  )
+)
+small_fold_log_path <- file.path(small_fold_out, "validate_repo.log")
+small_fold_log <- if (file.exists(small_fold_log_path)) {
+  paste(readLines(small_fold_log_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+small_fold_ok <- small_fold_run$status == 0 &&
+  grepl("Warning: Small validation folds for modeling data", small_fold_log)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "validate_repo_warns_on_small_validation_folds",
+  small_fold_ok,
+  if (small_fold_ok) {
+    "validate_repo.R warns when fold sizes may make CV metrics unstable"
+  } else {
+    paste("validate_repo.R did not emit the expected small-fold warning:", small_fold_run$output)
+  }
+)
+
+# validate_repo.R should warn about constant and near-constant features
+low_info_fixture_dir <- file.path(TEST_OUTPUT_DIR, "low_info_fixture")
+unlink(low_info_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(low_info_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+low_info_input <- file.path(low_info_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = seq_len(20),
+    constant_feature = rep(1, 20),
+    near_constant_feature = c(rep(0, 19), 1)
+  ),
+  low_info_input
+)
+
+low_info_out <- file.path(low_info_fixture_dir, "outputs")
+low_info_run <- run_script(
+  "validate_repo.R",
+  args = c(
+    sprintf("--data=%s", low_info_input),
+    sprintf("--output-dir=%s", low_info_out),
+    "--target=target",
+    "--features=constant_feature,near_constant_feature",
+    "--folds=2",
+    "--inner-folds=2"
+  )
+)
+low_info_log_path <- file.path(low_info_out, "validate_repo.log")
+low_info_log <- if (file.exists(low_info_log_path)) {
+  paste(readLines(low_info_log_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+low_info_ok <- low_info_run$status == 0 &&
+  grepl("Warning: Constant feature\\(s\\) found in modeling data: constant_feature", low_info_log) &&
+  grepl("Warning: Near-constant numeric feature\\(s\\) found in modeling data: near_constant_feature", low_info_log)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "validate_repo_warns_on_low_information_features",
+  low_info_ok,
+  if (low_info_ok) {
+    "validate_repo.R warns about constant and near-constant predictors"
+  } else {
+    paste("validate_repo.R did not emit the expected low-information feature warnings:", low_info_run$output)
+  }
+)
+
+# mlr3_xgb_tuning.R should run with factor features using fold-local encoding
 xgb_factor_fixture_dir <- file.path(TEST_OUTPUT_DIR, "xgb_factor_fixture")
 unlink(xgb_factor_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(xgb_factor_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -336,7 +430,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 8. compare_best_models.R should report availability for missing/failed outputs
+# compare_best_models.R should report availability for missing/failed outputs
 compare_fixture_root <- file.path(TEST_OUTPUT_DIR, "compare_fixture")
 unlink(compare_fixture_root, recursive = TRUE, force = TRUE)
 dir.create(file.path(compare_fixture_root, "outputs_ranger"), recursive = TRUE, showWarnings = FALSE)
@@ -402,7 +496,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 4b. compare_best_models.R should allow a valid baseline-only ZINB run
+# compare_best_models.R should allow a valid baseline-only ZINB run
 zinb_baseline_fixture_root <- file.path(TEST_OUTPUT_DIR, "compare_zinb_baseline_fixture")
 unlink(zinb_baseline_fixture_root, recursive = TRUE, force = TRUE)
 dir.create(file.path(zinb_baseline_fixture_root, "outputs_ranger"), recursive = TRUE, showWarnings = FALSE)
@@ -456,7 +550,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 5. write_run_summary.R should create summary files from run manifests
+# write_run_summary.R should create summary files from run manifests
 summary_fixture_root <- file.path(TEST_OUTPUT_DIR, "run_summary_fixture")
 unlink(summary_fixture_root, recursive = TRUE, force = TRUE)
 dir.create(file.path(summary_fixture_root, "outputs_ranger"), recursive = TRUE, showWarnings = FALSE)
@@ -510,7 +604,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 5. preprocess_data.R should report row removals separately for filter and na.omit()
+# preprocess_data.R should report row removals separately for filter and na.omit()
 preprocess_fixture_dir <- file.path(TEST_OUTPUT_DIR, "preprocess_fixture")
 unlink(preprocess_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(preprocess_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -564,7 +658,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 6. preprocess_data.R should support reproducible random subsampling
+# preprocess_data.R should support reproducible random subsampling
 preprocess_sample_fixture_dir <- file.path(TEST_OUTPUT_DIR, "preprocess_sample_fixture")
 unlink(preprocess_sample_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(preprocess_sample_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -619,7 +713,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 7. validate_repo.R should allow modeling row filters on non-feature columns
+# validate_repo.R should allow modeling row filters on non-feature columns
 row_filter_fixture_dir <- file.path(TEST_OUTPUT_DIR, "row_filter_fixture")
 unlink(row_filter_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(row_filter_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -668,7 +762,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 8. validate_repo.R should allow ZINB zero-formula columns outside FEATURE_COLS
+# validate_repo.R should allow ZINB zero-formula columns outside FEATURE_COLS
 zero_formula_fixture_dir <- file.path(TEST_OUTPUT_DIR, "zero_formula_fixture")
 unlink(zero_formula_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(zero_formula_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -712,7 +806,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 9. zinb_stepwise_cv.R should consider factor() candidates for low-cardinality numeric features
+# zinb_stepwise_cv.R should consider factor() candidates for low-cardinality numeric features
 zinb_factor_fixture_dir <- file.path(TEST_OUTPUT_DIR, "zinb_factor_fixture")
 unlink(zinb_factor_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(zinb_factor_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -758,7 +852,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 10. zinb_stepwise_cv.R should allow explicit numeric-as-factor variable overrides
+# zinb_stepwise_cv.R should allow explicit numeric-as-factor variable overrides
 zinb_factor_override_fixture_dir <- file.path(TEST_OUTPUT_DIR, "zinb_factor_override_fixture")
 unlink(zinb_factor_override_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(zinb_factor_override_fixture_dir, recursive = TRUE, showWarnings = FALSE)

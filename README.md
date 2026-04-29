@@ -247,6 +247,9 @@ modeling:
 - if `id_cols` are configured and repeated identifier combinations are found,
   the scripts warn that ordinary row-wise CV may leak grouped entities and that
   grouped CV or aggregation should be considered
+- `validate_repo.R` also warns about very small validation folds and constant or
+  near-constant predictors, and writes a `resolved_config` snapshot alongside
+  `validation_checks.csv`
 
 By default, `run_all.sh` versions each full run under a timestamped directory:
 
