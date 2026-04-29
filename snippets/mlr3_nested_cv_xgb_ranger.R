@@ -28,6 +28,7 @@ zinb_min_improvement <- 0
 zinb_numeric_transforms <- c("raw", "sqrt", "log1p", "ns2", "factor")
 zinb_factor_numeric_max_levels <- 12L
 zinb_zero <- "1"
+zinb_fit_attempts <- list(list(label = "em100", EM = TRUE, maxit = 100L))
 cores <- parallel::detectCores(logical = FALSE)
 # Viele Tuning-Jobs: learner_threads <- 1 und mehr workers. Wenige Jobs: learner_threads erhoehen.
 learner_threads <- 1L # Bei tune_evals=1 ggf. workers <- 1 und learner_threads > 1 setzen.
@@ -120,25 +121,43 @@ make_zinb_candidates <- function(work_dt, pool) {
   }))
 }
 
-# ZINB nutzt Standard-Fit-Parameter; optimiert wird hier nur die Count-Model-Formel.
+# ZINB nutzt kompakte Fit-Versuche; optimiert wird hier nur die Count-Model-Formel.
 zinb_formula <- function(terms, zero = "1") {
   rhs <- if (length(terms) > 0) paste(terms, collapse = " + ") else "1"
   as.formula(sprintf("%s ~ %s | %s", target, rhs, zero))
 }
 
+zinb_converged <- function(fit) {
+  optim_convergence <- fit$optim$convergence
+  optim_ok <- is.null(optim_convergence) || identical(as.integer(optim_convergence), 0L)
+  isTRUE(fit$converged) && optim_ok
+}
+
 # Rueckgabe NULL bedeutet: Fit oder Prediction war unbrauchbar, Kandidat wird verworfen.
 fit_predict_zinb <- function(train_dt, test_dt, terms, zero = "1") {
+  fit <- NULL
   fit_warnings <- character()
-  fit <- tryCatch(
-    withCallingHandlers(
-      pscl::zeroinfl(zinb_formula(terms, zero), data = train_dt, dist = "negbin", EM = TRUE),
-      warning = function(w) {
-        fit_warnings <<- c(fit_warnings, conditionMessage(w))
-        invokeRestart("muffleWarning")
-      }
-    ),
-    error = function(e) NULL
-  )
+  for (attempt in zinb_fit_attempts) {
+    fit_warnings <- character()
+    fit <- tryCatch(
+      withCallingHandlers(
+        pscl::zeroinfl(
+          zinb_formula(terms, zero),
+          data = train_dt,
+          dist = "negbin",
+          EM = attempt$EM,
+          control = pscl::zeroinfl.control(maxit = attempt$maxit)
+        ),
+        warning = function(w) {
+          fit_warnings <<- c(fit_warnings, conditionMessage(w))
+          invokeRestart("muffleWarning")
+        }
+      ),
+      error = function(e) NULL
+    )
+    if (!is.null(fit) && zinb_converged(fit)) break
+    fit <- NULL
+  }
   if (is.null(fit)) return(NULL)
   pred <- tryCatch(as.numeric(predict(fit, newdata = test_dt, type = "response")), error = function(e) NULL)
   if (is.null(pred) || length(pred) != nrow(test_dt) || anyNA(pred) || any(!is.finite(pred))) return(NULL)
