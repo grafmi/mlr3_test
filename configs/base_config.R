@@ -28,6 +28,10 @@ CONFIG <- list(
     # validation loop unchanged.
     inner_folds = 5L,
     strata_bins = 10L,
+    # Warn if modeling drops more than this fraction of rows via na.omit().
+    # This is a guardrail for real data where missingness can silently shift
+    # the modeled population. Set to NA to disable the warning.
+    missing_drop_warn_fraction = 0.05,
     # Worker processes for mlr3 tuning and resampling. A practical default on
     # a workstation is often physical CPU cores minus one.
     n_workers = 1L
@@ -83,6 +87,10 @@ CONFIG <- list(
   ranger = list(
     output_dir = "outputs_ranger",
     tune_evals = 10L,
+    # Number of random-search configurations evaluated per tuning batch.
+    # Higher values can better utilize many workers: roughly
+    # tune_batch_size * inner_folds jobs can be active during tuning.
+    tune_batch_size = 1L,
     # Search-space entries can be removed or commented out. If a supported
     # optional entry is missing here, it is simply not tuned.
     search_space = list(
@@ -109,6 +117,10 @@ CONFIG <- list(
   xgboost = list(
     output_dir = "outputs_xgb",
     tune_evals = 10L,
+    # Number of random-search configurations evaluated per tuning batch.
+    # Higher values can better utilize many workers while keeping xgboost
+    # model-level threads at 1.
+    tune_batch_size = 1L,
     # Search-space entries can be removed or commented out. If a supported
     # optional entry is missing here, it is simply not tuned.
     search_space = list(
@@ -146,6 +158,11 @@ CONFIG <- list(
     # Where all ZINB CV results, candidate tables, metrics, and logs are
     # written.
     output_dir = "outputs_zinb",
+
+    # Optional reduced predictor set for ZINB only. Leave empty to reuse
+    # CONFIG$experiment$feature_cols. This is useful when the full ranger/XGB
+    # feature set makes ZINB stepwise selection too slow on real data.
+    feature_cols = character(0),
 
     # Metric used to decide which candidate is best during forward selection.
     # Supported values include rmse, mae, max_error, mse, r2,

@@ -67,7 +67,18 @@ INNER_FOLDS <- get_int_setting("inner-folds", "INNER_FOLDS", config_value(CONFIG
 OUTER_REPEATS <- get_int_setting("outer-repeats", "OUTER_REPEATS", config_value_or(CONFIG, c("experiment", "outer_repeats"), 1L), min_value = 1)
 SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
 TUNE_EVALS <- get_int_setting("tune-evals", "TUNE_EVALS", config_value(CONFIG, c("ranger", "tune_evals")), min_value = 1)
+TUNE_BATCH_SIZE <- get_int_setting(
+  "tune-batch-size", "RANGER_TUNE_BATCH_SIZE",
+  get_setting("tune-batch-size", "TUNE_BATCH_SIZE", config_value_or(CONFIG, c("ranger", "tune_batch_size"), 1L)),
+  min_value = 1
+)
+EFFECTIVE_TUNE_BATCH_SIZE <- min(TUNE_BATCH_SIZE, TUNE_EVALS)
 STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", config_value(CONFIG, c("experiment", "strata_bins")), min_value = 2)
+MISSING_DROP_WARN_FRACTION <- get_optional_numeric_setting(
+  "missing-drop-warn-fraction", "MISSING_DROP_WARN_FRACTION",
+  config_value_or(CONFIG, c("experiment", "missing_drop_warn_fraction"), 0.05),
+  min_value = 0
+)
 N_WORKERS <- get_int_setting("workers", "N_WORKERS", config_value(CONFIG, c("experiment", "n_workers")), min_value = 1)
 
 # =========================
@@ -87,9 +98,14 @@ with_run_finalizer({
     future::plan(future::sequential)
   }
   on.exit(future::plan(future::sequential), add = TRUE)
+  EFFECTIVE_FUTURE_WORKERS <- future::nbrOfWorkers()
 
   df <- load_csv_checked(DATA_PATH)
-  work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS, row_filter = ROW_FILTER)
+  work_dt <- prepare_modeling_data(
+    df, TARGET, FEATURE_COLS, ID_COLS,
+    row_filter = ROW_FILTER,
+    missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
+  )
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
   resolved_config <- list(
     script_name = SCRIPT_NAME,
@@ -105,8 +121,13 @@ with_run_finalizer({
     inner_folds = INNER_FOLDS,
     outer_repeats = OUTER_REPEATS,
     strata_bins = STRATA_BINS,
+    missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION,
     tune_evals = TUNE_EVALS,
-    n_workers = N_WORKERS
+    tune_batch_size = TUNE_BATCH_SIZE,
+    effective_tune_batch_size = EFFECTIVE_TUNE_BATCH_SIZE,
+    n_workers = N_WORKERS,
+    future_workers = EFFECTIVE_FUTURE_WORKERS,
+    ranger_num_threads = 1L
   )
   write_config_snapshot(OUTPUT_DIR, resolved_config)
 
@@ -123,8 +144,12 @@ with_run_finalizer({
     extra = list(
       "Outer repeats" = OUTER_REPEATS,
       "Outer folds / inner folds" = paste(N_FOLDS, INNER_FOLDS, sep = " / "),
+      "Missing-drop warn fraction" = if (is.na(MISSING_DROP_WARN_FRACTION)) "<disabled>" else MISSING_DROP_WARN_FRACTION,
       "Tuning evals" = TUNE_EVALS,
-      "Workers" = N_WORKERS
+      "Tune batch size" = EFFECTIVE_TUNE_BATCH_SIZE,
+      "Configured workers" = N_WORKERS,
+      "Future workers" = EFFECTIVE_FUTURE_WORKERS,
+      "Ranger num.threads" = 1L
     )
   )
   overview_dt <- dataset_overview(work_dt, target = TARGET, feature_cols = FEATURE_COLS, id_cols = ID_COLS)
@@ -174,7 +199,7 @@ with_run_finalizer({
   inner_cv <- rsmp("cv", folds = INNER_FOLDS)
 
   at <- auto_tuner(
-    tuner = tnr("random_search"),
+    tuner = tnr("random_search", batch_size = EFFECTIVE_TUNE_BATCH_SIZE),
     learner = learner,
     resampling = inner_cv,
     measure = msr("regr.rmse"),
@@ -239,7 +264,11 @@ with_run_finalizer({
     sprintf("- inner_folds: `%s`", INNER_FOLDS),
     sprintf("- outer_repeats: `%s`", OUTER_REPEATS),
     sprintf("- tune_evals: `%s`", TUNE_EVALS),
+    sprintf("- tune_batch_size: `%s`", TUNE_BATCH_SIZE),
+    sprintf("- effective_tune_batch_size: `%s`", EFFECTIVE_TUNE_BATCH_SIZE),
     sprintf("- workers: `%s`", N_WORKERS),
+    sprintf("- future_workers: `%s`", EFFECTIVE_FUTURE_WORKERS),
+    "- ranger_num_threads: `1`",
     "",
     "## Dataset",
     sprintf("- rows: `%s`", overview_dt$n_rows[[1]]),

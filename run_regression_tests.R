@@ -87,30 +87,74 @@ run_script <- function(script_name, args = character(0), env = character(0), wor
 
 tests <- list()
 
-# 1. validate_repo.R should succeed and write expected artifacts
+# validate_repo.R should succeed and write expected artifacts
 validate_out <- file.path(TEST_OUTPUT_DIR, "validate_repo")
 unlink(validate_out, recursive = TRUE, force = TRUE)
 validate_run <- run_script("validate_repo.R", args = c(sprintf("--output-dir=%s", validate_out)))
 validate_checks_path <- file.path(validate_out, "validation_checks.csv")
 validate_log_path <- file.path(validate_out, "validate_repo.log")
 validate_manifest_path <- file.path(validate_out, "run_manifest.csv")
+validate_config_path <- file.path(validate_out, "resolved_config.rds")
+validate_report_path <- file.path(validate_out, "validation_report.md")
+validate_dictionary_path <- file.path(validate_out, "validation_data_dictionary.csv")
+validate_session_path <- file.path(validate_out, "session_info.txt")
+validate_report <- if (file.exists(validate_report_path)) {
+  paste(readLines(validate_report_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+validate_dictionary <- read_csv_if_exists(validate_dictionary_path)
+validate_session <- if (file.exists(validate_session_path)) {
+  paste(readLines(validate_session_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
 
 validate_ok <- validate_run$status == 0 &&
   file.exists(validate_checks_path) &&
   file.exists(validate_log_path) &&
-  file.exists(validate_manifest_path)
+  file.exists(validate_manifest_path) &&
+  file.exists(validate_config_path) &&
+  file.exists(validate_report_path) &&
+  file.exists(validate_dictionary_path) &&
+  file.exists(validate_session_path) &&
+  grepl("# validate_repo Report", validate_report, fixed = TRUE) &&
+  grepl("| `required_packages` | `TRUE` |", validate_report, fixed = TRUE) &&
+  grepl("## Data Dictionary", validate_report, fixed = TRUE) &&
+  !is.null(validate_dictionary) &&
+  all(c("column", "role", "class", "pct_missing", "n_unique") %in% names(validate_dictionary)) &&
+  grepl("R version", validate_session, fixed = TRUE)
 
 tests[[length(tests) + 1L]] <- record_test(
   "validate_repo_success",
   validate_ok,
   if (validate_ok) {
-    "validate_repo.R completed and wrote checks, log, and manifest"
+    "validate_repo.R completed and wrote checks, log, manifest, config snapshot, report, data dictionary, and session info"
   } else {
     paste("validate_repo.R failed:", validate_run$output)
   }
 )
 
-# 2. Failed ranger run should still write log and manifest
+# run_all.sh should validate before running model scripts
+run_all_lines <- readLines(file.path(REPO_DIR, "run_all.sh"), warn = FALSE)
+validation_step <- grep("Running repository validation", run_all_lines, fixed = TRUE)
+ranger_step <- grep("Running ranger tuning", run_all_lines, fixed = TRUE)
+run_all_preflight_ok <- length(validation_step) == 1L &&
+  length(ranger_step) == 1L &&
+  validation_step < ranger_step &&
+  any(grepl("^export VALIDATION_OUTPUT_DIR$", run_all_lines))
+
+tests[[length(tests) + 1L]] <- record_test(
+  "run_all_runs_validation_before_models",
+  run_all_preflight_ok,
+  if (run_all_preflight_ok) {
+    "run_all.sh runs validate_repo.R before model scripts and exports validation output"
+  } else {
+    "run_all.sh does not appear to run validation before model scripts"
+  }
+)
+
+# Failed ranger run should still write log and manifest
 ranger_fail_out <- file.path(TEST_OUTPUT_DIR, "ranger_failed_run")
 unlink(ranger_fail_out, recursive = TRUE, force = TRUE)
 ranger_fail_run <- run_script(
@@ -135,7 +179,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 3. Repeated outer CV should add repeat metadata without changing overall metrics
+# Repeated outer CV should add repeat metadata without changing overall metrics
 ranger_repeat_out <- file.path(TEST_OUTPUT_DIR, "ranger_repeated_run")
 unlink(ranger_repeat_out, recursive = TRUE, force = TRUE)
 ranger_repeat_run <- run_script(
@@ -174,10 +218,292 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 4. compare_best_models.R should report availability for missing outputs
+# validate_repo.R should warn when missing-value row drops exceed the threshold
+missing_warn_fixture_dir <- file.path(TEST_OUTPUT_DIR, "missing_warn_fixture")
+unlink(missing_warn_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(missing_warn_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+missing_warn_input <- file.path(missing_warn_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = c(1, 2, 3, 4),
+    feature_a = c(10, NA, NA, 40)
+  ),
+  missing_warn_input
+)
+
+missing_warn_out <- file.path(missing_warn_fixture_dir, "outputs")
+missing_warn_run <- run_script(
+  "validate_repo.R",
+  args = c(
+    sprintf("--data=%s", missing_warn_input),
+    sprintf("--output-dir=%s", missing_warn_out),
+    "--target=target",
+    "--features=feature_a",
+    "--missing-drop-warn-fraction=0.25"
+  )
+)
+missing_warn_log_path <- file.path(missing_warn_out, "validate_repo.log")
+missing_warn_log <- if (file.exists(missing_warn_log_path)) {
+  paste(readLines(missing_warn_log_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+missing_warn_ok <- missing_warn_run$status == 0 &&
+  grepl("Warning: Dropped 2 of 4 row\\(s\\) with missing values in modeling data", missing_warn_log)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "validate_repo_warns_on_high_missing_row_drop",
+  missing_warn_ok,
+  if (missing_warn_ok) {
+    "validate_repo.R warns when modeling na.omit drops exceed the configured threshold"
+  } else {
+    paste("validate_repo.R did not emit the expected missing-drop warning:", missing_warn_run$output)
+  }
+)
+
+# validate_repo.R should warn when ID columns have repeated values
+duplicate_id_fixture_dir <- file.path(TEST_OUTPUT_DIR, "duplicate_id_fixture")
+unlink(duplicate_id_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(duplicate_id_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+duplicate_id_input <- file.path(duplicate_id_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = c(1, 2, 3, 4),
+    feature_a = c(10, 20, 30, 40),
+    customer_id = c("a", "a", "b", "c")
+  ),
+  duplicate_id_input
+)
+
+duplicate_id_out <- file.path(duplicate_id_fixture_dir, "outputs")
+duplicate_id_run <- run_script(
+  "validate_repo.R",
+  args = c(
+    sprintf("--data=%s", duplicate_id_input),
+    sprintf("--output-dir=%s", duplicate_id_out),
+    "--target=target",
+    "--features=feature_a",
+    "--id-cols=customer_id"
+  )
+)
+duplicate_id_log_path <- file.path(duplicate_id_out, "validate_repo.log")
+duplicate_id_log <- if (file.exists(duplicate_id_log_path)) {
+  paste(readLines(duplicate_id_log_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+duplicate_id_ok <- duplicate_id_run$status == 0 &&
+  grepl("Warning: ID column\\(s\\) have repeated value combinations", duplicate_id_log) &&
+  grepl("Standard row-wise CV may leak grouped entities", duplicate_id_log)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "validate_repo_warns_on_duplicate_id_values",
+  duplicate_id_ok,
+  if (duplicate_id_ok) {
+    "validate_repo.R warns when ID columns suggest possible grouped-CV leakage"
+  } else {
+    paste("validate_repo.R did not emit the expected duplicate-ID warning:", duplicate_id_run$output)
+  }
+)
+
+# validate_repo.R should warn when validation folds are small
+small_fold_fixture_dir <- file.path(TEST_OUTPUT_DIR, "small_fold_fixture")
+unlink(small_fold_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(small_fold_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+small_fold_input <- file.path(small_fold_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = seq_len(20),
+    feature_a = seq_len(20)
+  ),
+  small_fold_input
+)
+
+small_fold_out <- file.path(small_fold_fixture_dir, "outputs")
+small_fold_run <- run_script(
+  "validate_repo.R",
+  args = c(
+    sprintf("--data=%s", small_fold_input),
+    sprintf("--output-dir=%s", small_fold_out),
+    "--target=target",
+    "--features=feature_a",
+    "--folds=10",
+    "--inner-folds=5"
+  )
+)
+small_fold_log_path <- file.path(small_fold_out, "validate_repo.log")
+small_fold_log <- if (file.exists(small_fold_log_path)) {
+  paste(readLines(small_fold_log_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+small_fold_ok <- small_fold_run$status == 0 &&
+  grepl("Warning: Small validation folds for modeling data", small_fold_log)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "validate_repo_warns_on_small_validation_folds",
+  small_fold_ok,
+  if (small_fold_ok) {
+    "validate_repo.R warns when fold sizes may make CV metrics unstable"
+  } else {
+    paste("validate_repo.R did not emit the expected small-fold warning:", small_fold_run$output)
+  }
+)
+
+# validate_repo.R should warn about constant and near-constant features
+low_info_fixture_dir <- file.path(TEST_OUTPUT_DIR, "low_info_fixture")
+unlink(low_info_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(low_info_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+low_info_input <- file.path(low_info_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = seq_len(20),
+    constant_feature = rep(1, 20),
+    near_constant_feature = c(rep(0, 19), 1)
+  ),
+  low_info_input
+)
+
+low_info_out <- file.path(low_info_fixture_dir, "outputs")
+low_info_run <- run_script(
+  "validate_repo.R",
+  args = c(
+    sprintf("--data=%s", low_info_input),
+    sprintf("--output-dir=%s", low_info_out),
+    "--target=target",
+    "--features=constant_feature,near_constant_feature",
+    "--folds=2",
+    "--inner-folds=2"
+  )
+)
+low_info_log_path <- file.path(low_info_out, "validate_repo.log")
+low_info_log <- if (file.exists(low_info_log_path)) {
+  paste(readLines(low_info_log_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+low_info_ok <- low_info_run$status == 0 &&
+  grepl("Warning: Constant feature\\(s\\) found in modeling data: constant_feature", low_info_log) &&
+  grepl("Warning: Near-constant numeric feature\\(s\\) found in modeling data: near_constant_feature", low_info_log)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "validate_repo_warns_on_low_information_features",
+  low_info_ok,
+  if (low_info_ok) {
+    "validate_repo.R warns about constant and near-constant predictors"
+  } else {
+    paste("validate_repo.R did not emit the expected low-information feature warnings:", low_info_run$output)
+  }
+)
+
+# validate_repo.R should warn about extreme target distributions
+target_extreme_fixture_dir <- file.path(TEST_OUTPUT_DIR, "target_extreme_fixture")
+unlink(target_extreme_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(target_extreme_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+target_extreme_input <- file.path(target_extreme_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = c(rep(0, 12), 1:7, 1000),
+    feature_a = seq_len(20)
+  ),
+  target_extreme_input
+)
+
+target_extreme_out <- file.path(target_extreme_fixture_dir, "outputs")
+target_extreme_run <- run_script(
+  "validate_repo.R",
+  args = c(
+    sprintf("--data=%s", target_extreme_input),
+    sprintf("--output-dir=%s", target_extreme_out),
+    "--target=target",
+    "--features=feature_a",
+    "--folds=2",
+    "--inner-folds=2"
+  )
+)
+target_extreme_log_path <- file.path(target_extreme_out, "validate_repo.log")
+target_extreme_log <- if (file.exists(target_extreme_log_path)) {
+  paste(readLines(target_extreme_log_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+target_extreme_ok <- target_extreme_run$status == 0 &&
+  grepl("Warning: Target 'target' has many zeros", target_extreme_log, fixed = TRUE) &&
+  grepl("Warning: Target 'target' has a high maximum value", target_extreme_log, fixed = TRUE)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "validate_repo_warns_on_target_extremes",
+  target_extreme_ok,
+  if (target_extreme_ok) {
+    "validate_repo.R warns about zero-heavy and high-maximum target distributions"
+  } else {
+    paste("validate_repo.R did not emit the expected target-extreme warnings:", target_extreme_run$output)
+  }
+)
+
+# mlr3_xgb_tuning.R should run with factor features using fold-local encoding
+xgb_factor_fixture_dir <- file.path(TEST_OUTPUT_DIR, "xgb_factor_fixture")
+unlink(xgb_factor_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(xgb_factor_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+xgb_factor_input <- file.path(xgb_factor_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = rep(0:5, length.out = 30),
+    region = rep(c("north", "south", "west"), each = 10),
+    exposure = seq(1, 30)
+  ),
+  xgb_factor_input
+)
+
+xgb_factor_out <- file.path(xgb_factor_fixture_dir, "outputs")
+xgb_factor_run <- run_script(
+  "mlr3_xgb_tuning.R",
+  args = c(
+    sprintf("--data=%s", xgb_factor_input),
+    sprintf("--output-dir=%s", xgb_factor_out),
+    "--target=target",
+    "--features=region,exposure",
+    "--folds=2",
+    "--inner-folds=2",
+    "--tune-evals=1",
+    "--workers=1"
+  )
+)
+xgb_factor_predictions <- read_csv_if_exists(file.path(xgb_factor_out, "xgb_cv_predictions.csv"))
+xgb_factor_overall <- read_csv_if_exists(file.path(xgb_factor_out, "xgb_overall_metrics.csv"))
+xgb_factor_report <- file.path(xgb_factor_out, "xgb_model_report.md")
+xgb_factor_report_text <- if (file.exists(xgb_factor_report)) {
+  paste(readLines(xgb_factor_report, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+xgb_factor_ok <- xgb_factor_run$status == 0 &&
+  !is.null(xgb_factor_predictions) &&
+  !is.null(xgb_factor_overall) &&
+  nrow(xgb_factor_predictions) == 30 &&
+  grepl("one-hot encoding is learned separately inside each outer-CV training split", xgb_factor_report_text, fixed = TRUE)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "xgb_uses_fold_local_encoding_for_factor_features",
+  xgb_factor_ok,
+  if (xgb_factor_ok) {
+    "mlr3_xgb_tuning.R runs factor features through fold-local one-hot encoding"
+  } else {
+    paste("mlr3_xgb_tuning.R did not complete factor-feature run:", xgb_factor_run$output)
+  }
+)
+
+# compare_best_models.R should report availability for missing/failed outputs
 compare_fixture_root <- file.path(TEST_OUTPUT_DIR, "compare_fixture")
 unlink(compare_fixture_root, recursive = TRUE, force = TRUE)
 dir.create(file.path(compare_fixture_root, "outputs_ranger"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(compare_fixture_root, "outputs_xgb_failed"), recursive = TRUE, showWarnings = FALSE)
 dir.create(file.path(compare_fixture_root, "outputs_model_comparison"), recursive = TRUE, showWarnings = FALSE)
 
 safe_write_csv(
@@ -195,12 +521,27 @@ safe_write_csv(
   data.table("repeat" = 1L, num.trees = 500L, regr.rmse = 1.2),
   file.path(compare_fixture_root, "outputs_ranger", "ranger_best_params.csv")
 )
+safe_write_csv(
+  data.table(script_name = "mlr3_xgb_tuning", status = "failed"),
+  file.path(compare_fixture_root, "outputs_xgb_failed", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(
+    rmse = 0.1, mae = 0.1, max_error = 0.2, sae = 0.0, mse = 0.01,
+    bias = 0.0, r2 = 0.99, poisson_deviance = 0.1, negloglik = NA_real_
+  ),
+  file.path(compare_fixture_root, "outputs_xgb_failed", "xgb_overall_metrics.csv")
+)
+safe_write_csv(
+  data.table(nrounds = 100L, regr.rmse = 0.1),
+  file.path(compare_fixture_root, "outputs_xgb_failed", "xgb_best_params.csv")
+)
 
 compare_run <- run_script(
   "compare_best_models.R",
   args = c(
     sprintf("--ranger-dir=%s", file.path(compare_fixture_root, "outputs_ranger")),
-    sprintf("--xgb-dir=%s", file.path(compare_fixture_root, "outputs_xgb_missing")),
+    sprintf("--xgb-dir=%s", file.path(compare_fixture_root, "outputs_xgb_failed")),
     sprintf("--zinb-dir=%s", file.path(compare_fixture_root, "outputs_zinb_missing")),
     sprintf("--output-dir=%s", file.path(compare_fixture_root, "outputs_model_comparison"))
   )
@@ -210,19 +551,145 @@ compare_ok <- compare_run$status == 0 &&
   !is.null(comparison_dt) &&
   all(c("availability_status", "availability_reason", "manifest_status") %in% names(comparison_dt)) &&
   "missing_directory" %in% comparison_dt$availability_status &&
-  "ranger" %in% comparison_dt$model
+  "failed_run" %in% comparison_dt$availability_status &&
+  identical(as.integer(comparison_dt[model == "ranger"]$rank[[1]]), 1L) &&
+  is.na(comparison_dt[model == "xgb"]$rank[[1]])
 
 tests[[length(tests) + 1L]] <- record_test(
-  "compare_best_models_reports_missing_inputs",
+  "compare_best_models_reports_unavailable_inputs_without_ranking_them",
   compare_ok,
   if (compare_ok) {
-    "comparison output reports missing model directories explicitly"
+    "comparison output reports unavailable models explicitly and excludes them from ranking"
   } else {
     paste("compare_best_models.R did not produce expected availability diagnostics:", compare_run$output)
   }
 )
 
-# 5. write_run_summary.R should create summary files from run manifests
+# compare_best_models.R should treat an intentionally skipped ZINB run as not rankable
+compare_skipped_fixture_root <- file.path(TEST_OUTPUT_DIR, "compare_skipped_fixture")
+unlink(compare_skipped_fixture_root, recursive = TRUE, force = TRUE)
+dir.create(file.path(compare_skipped_fixture_root, "outputs_ranger"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(compare_skipped_fixture_root, "outputs_xgb"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(compare_skipped_fixture_root, "outputs_zinb_skipped"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(compare_skipped_fixture_root, "outputs_model_comparison"), recursive = TRUE, showWarnings = FALSE)
+
+safe_write_csv(
+  data.table(script_name = "mlr3_ranger_tuning", status = "completed"),
+  file.path(compare_skipped_fixture_root, "outputs_ranger", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(
+    rmse = 1.2, mae = 0.8, max_error = 2.0, sae = 0.1, mse = 1.44,
+    bias = 0.05, r2 = 0.3, poisson_deviance = 0.9, negloglik = NA_real_
+  ),
+  file.path(compare_skipped_fixture_root, "outputs_ranger", "ranger_overall_metrics.csv")
+)
+safe_write_csv(
+  data.table("repeat" = 1L, num.trees = 500L, regr.rmse = 1.2),
+  file.path(compare_skipped_fixture_root, "outputs_ranger", "ranger_best_params.csv")
+)
+safe_write_csv(
+  data.table(script_name = "mlr3_xgb_tuning", status = "completed"),
+  file.path(compare_skipped_fixture_root, "outputs_xgb", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(
+    rmse = 1.0, mae = 0.7, max_error = 1.9, sae = 0.1, mse = 1.0,
+    bias = 0.02, r2 = 0.4, poisson_deviance = 0.8, negloglik = NA_real_
+  ),
+  file.path(compare_skipped_fixture_root, "outputs_xgb", "xgb_overall_metrics.csv")
+)
+safe_write_csv(
+  data.table(nrounds = 100L, regr.rmse = 1.0),
+  file.path(compare_skipped_fixture_root, "outputs_xgb", "xgb_best_params.csv")
+)
+safe_write_csv(
+  data.table(script_name = "zinb_stepwise_cv", status = "skipped"),
+  file.path(compare_skipped_fixture_root, "outputs_zinb_skipped", "run_manifest.csv")
+)
+
+compare_skipped_run <- run_script(
+  "compare_best_models.R",
+  args = c(
+    sprintf("--ranger-dir=%s", file.path(compare_skipped_fixture_root, "outputs_ranger")),
+    sprintf("--xgb-dir=%s", file.path(compare_skipped_fixture_root, "outputs_xgb")),
+    sprintf("--zinb-dir=%s", file.path(compare_skipped_fixture_root, "outputs_zinb_skipped")),
+    sprintf("--output-dir=%s", file.path(compare_skipped_fixture_root, "outputs_model_comparison"))
+  )
+)
+comparison_skipped_dt <- read_csv_if_exists(file.path(compare_skipped_fixture_root, "outputs_model_comparison", "best_models_comparison.csv"))
+compare_skipped_ok <- compare_skipped_run$status == 0 &&
+  !is.null(comparison_skipped_dt) &&
+  identical(as.character(comparison_skipped_dt[model == "zinb"]$availability_status[[1]]), "skipped") &&
+  grepl("intentionally skipped", comparison_skipped_dt[model == "zinb"]$availability_reason[[1]], fixed = TRUE) &&
+  is.na(comparison_skipped_dt[model == "zinb"]$rank[[1]]) &&
+  identical(as.integer(comparison_skipped_dt[model == "xgb"]$rank[[1]]), 1L)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "compare_best_models_excludes_skipped_zinb_from_ranking",
+  compare_skipped_ok,
+  if (compare_skipped_ok) {
+    "comparison output marks skipped ZINB explicitly and excludes it from ranking"
+  } else {
+    paste("compare_best_models.R did not handle skipped ZINB as expected:", compare_skipped_run$output)
+  }
+)
+
+# compare_best_models.R should allow a valid baseline-only ZINB run
+zinb_baseline_fixture_root <- file.path(TEST_OUTPUT_DIR, "compare_zinb_baseline_fixture")
+unlink(zinb_baseline_fixture_root, recursive = TRUE, force = TRUE)
+dir.create(file.path(zinb_baseline_fixture_root, "outputs_ranger"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(zinb_baseline_fixture_root, "outputs_xgb"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(zinb_baseline_fixture_root, "outputs_zinb"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(zinb_baseline_fixture_root, "outputs_model_comparison"), recursive = TRUE, showWarnings = FALSE)
+
+safe_write_csv(
+  data.table(script_name = "zinb_stepwise_cv", status = "completed"),
+  file.path(zinb_baseline_fixture_root, "outputs_zinb", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(
+    rmse = 1.1, mae = 0.7, max_error = 2.0, sae = 0.0, mse = 1.21,
+    bias = 0.0, r2 = 0.2, poisson_deviance = 0.8, negloglik = 1.5
+  ),
+  file.path(zinb_baseline_fixture_root, "outputs_zinb", "zinb_best_global_overall_metrics.csv")
+)
+safe_write_csv(
+  data.table(
+    formula = "target ~ 1 | 1",
+    selected_terms = NA_character_,
+    stop_reason = "baseline_retained"
+  ),
+  file.path(zinb_baseline_fixture_root, "outputs_zinb", "zinb_final_model_summary.csv")
+)
+
+zinb_baseline_compare_run <- run_script(
+  "compare_best_models.R",
+  args = c(
+    sprintf("--ranger-dir=%s", file.path(zinb_baseline_fixture_root, "outputs_ranger")),
+    sprintf("--xgb-dir=%s", file.path(zinb_baseline_fixture_root, "outputs_xgb")),
+    sprintf("--zinb-dir=%s", file.path(zinb_baseline_fixture_root, "outputs_zinb")),
+    sprintf("--output-dir=%s", file.path(zinb_baseline_fixture_root, "outputs_model_comparison"))
+  )
+)
+zinb_baseline_comparison <- read_csv_if_exists(file.path(zinb_baseline_fixture_root, "outputs_model_comparison", "best_models_comparison.csv"))
+zinb_baseline_ok <- zinb_baseline_compare_run$status == 0 &&
+  !is.null(zinb_baseline_comparison) &&
+  identical(as.character(zinb_baseline_comparison[model == "zinb"]$availability_status[[1]]), "ok") &&
+  identical(as.integer(zinb_baseline_comparison[model == "zinb"]$rank[[1]]), 1L) &&
+  grepl("<baseline>", zinb_baseline_comparison[model == "zinb"]$details[[1]], fixed = TRUE)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "compare_best_models_accepts_baseline_only_zinb",
+  zinb_baseline_ok,
+  if (zinb_baseline_ok) {
+    "baseline-only ZINB outputs are considered complete and comparable"
+  } else {
+    paste("compare_best_models.R did not accept baseline-only ZINB outputs:", zinb_baseline_compare_run$output)
+  }
+)
+
+# write_run_summary.R should create summary files from run manifests
 summary_fixture_root <- file.path(TEST_OUTPUT_DIR, "run_summary_fixture")
 unlink(summary_fixture_root, recursive = TRUE, force = TRUE)
 dir.create(file.path(summary_fixture_root, "outputs_ranger"), recursive = TRUE, showWarnings = FALSE)
@@ -276,7 +743,63 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 5. preprocess_data.R should report row removals separately for filter and na.omit()
+# write_run_summary.R should mark intentional skips without failing the full run
+summary_skipped_fixture_root <- file.path(TEST_OUTPUT_DIR, "run_summary_skipped_fixture")
+unlink(summary_skipped_fixture_root, recursive = TRUE, force = TRUE)
+for (dir_name in c("outputs_validation", "outputs_ranger", "outputs_xgb", "outputs_zinb_skipped", "outputs_model_comparison")) {
+  dir.create(file.path(summary_skipped_fixture_root, dir_name), recursive = TRUE, showWarnings = FALSE)
+}
+safe_write_csv(
+  data.table(script_name = "validate_repo", status = "completed", start_time = "2026-04-23 10:00:00 CEST", end_time = "2026-04-23 10:00:05 CEST", runtime_seconds = 5),
+  file.path(summary_skipped_fixture_root, "outputs_validation", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(script_name = "mlr3_ranger_tuning", status = "completed", start_time = "2026-04-23 10:00:05 CEST", end_time = "2026-04-23 10:01:00 CEST", runtime_seconds = 55),
+  file.path(summary_skipped_fixture_root, "outputs_ranger", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(script_name = "mlr3_xgb_tuning", status = "completed", start_time = "2026-04-23 10:01:00 CEST", end_time = "2026-04-23 10:02:00 CEST", runtime_seconds = 60),
+  file.path(summary_skipped_fixture_root, "outputs_xgb", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(script_name = "zinb_stepwise_cv", status = "skipped", start_time = "2026-04-23 10:02:00 CEST", end_time = "2026-04-23 10:02:00 CEST", runtime_seconds = 0),
+  file.path(summary_skipped_fixture_root, "outputs_zinb_skipped", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(script_name = "compare_best_models", status = "completed", start_time = "2026-04-23 10:02:00 CEST", end_time = "2026-04-23 10:02:05 CEST", runtime_seconds = 5),
+  file.path(summary_skipped_fixture_root, "outputs_model_comparison", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(rank = 1, model = "xgb", rmse = 1.0, mae = 0.7, r2 = 0.4),
+  file.path(summary_skipped_fixture_root, "outputs_model_comparison", "best_models_comparison.csv")
+)
+
+summary_skipped_run <- run_script(
+  "write_run_summary.R",
+  env = c(
+    sprintf("RUN_OUTPUT_ROOT=%s", summary_skipped_fixture_root),
+    sprintf("ZINB_OUTPUT_DIR=%s", file.path(summary_skipped_fixture_root, "outputs_zinb_skipped"))
+  )
+)
+summary_skipped_dt <- read_csv_if_exists(file.path(summary_skipped_fixture_root, "run_summary.csv"))
+summary_skipped_scripts_dt <- read_csv_if_exists(file.path(summary_skipped_fixture_root, "run_summary_scripts.csv"))
+summary_skipped_ok <- summary_skipped_run$status == 0 &&
+  !is.null(summary_skipped_dt) &&
+  !is.null(summary_skipped_scripts_dt) &&
+  identical(as.character(summary_skipped_dt$run_status[[1]]), "completed_with_skips") &&
+  identical(as.character(summary_skipped_scripts_dt[script_name == "zinb_stepwise_cv"]$status[[1]]), "skipped")
+
+tests[[length(tests) + 1L]] <- record_test(
+  "write_run_summary_marks_skipped_zinb_without_failed_run",
+  summary_skipped_ok,
+  if (summary_skipped_ok) {
+    "run summary marks intentional ZINB skips as completed_with_skips"
+  } else {
+    paste("write_run_summary.R did not handle skipped ZINB as expected:", summary_skipped_run$output)
+  }
+)
+
+# preprocess_data.R should report row removals separately for filter and na.omit()
 preprocess_fixture_dir <- file.path(TEST_OUTPUT_DIR, "preprocess_fixture")
 unlink(preprocess_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(preprocess_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -330,7 +853,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 6. preprocess_data.R should support reproducible random subsampling
+# preprocess_data.R should support reproducible random subsampling
 preprocess_sample_fixture_dir <- file.path(TEST_OUTPUT_DIR, "preprocess_sample_fixture")
 unlink(preprocess_sample_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(preprocess_sample_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -385,7 +908,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 7. validate_repo.R should allow modeling row filters on non-feature columns
+# validate_repo.R should allow modeling row filters on non-feature columns
 row_filter_fixture_dir <- file.path(TEST_OUTPUT_DIR, "row_filter_fixture")
 unlink(row_filter_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(row_filter_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -434,7 +957,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 8. validate_repo.R should allow ZINB zero-formula columns outside FEATURE_COLS
+# validate_repo.R should allow ZINB zero-formula columns outside FEATURE_COLS
 zero_formula_fixture_dir <- file.path(TEST_OUTPUT_DIR, "zero_formula_fixture")
 unlink(zero_formula_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(zero_formula_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -478,7 +1001,61 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 9. zinb_stepwise_cv.R should consider factor() candidates for low-cardinality numeric features
+# zinb_stepwise_cv.R should allow a reduced config-only ZINB feature set
+zinb_feature_config_fixture_dir <- file.path(TEST_OUTPUT_DIR, "zinb_feature_config_fixture")
+unlink(zinb_feature_config_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(zinb_feature_config_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+zinb_feature_config_path <- file.path(zinb_feature_config_fixture_dir, "zinb_feature_config.R")
+writeLines(
+  c(
+    sprintf("sys.source(\"%s\", envir = environment())", gsub("\\\\", "/", REGRESSION_CONFIG_PATH)),
+    "CONFIG$experiment$feature_cols <- c(\"prcrank\", \"potenzielle_kunden\", \"unfalldeckung\")",
+    "CONFIG$zinb$feature_cols <- c(\"prcrank\")",
+    "CONFIG$zinb$transformations_numeric <- c(\"raw\")",
+    "CONFIG$zinb$transformations_factor <- c(\"raw\")",
+    "CONFIG$zinb$parallel_backend <- \"sequential\"",
+    "CONFIG$zinb$workers <- 1L",
+    "CONFIG$zinb$verbosity <- \"quiet\""
+  ),
+  zinb_feature_config_path
+)
+
+zinb_feature_config_out <- file.path(zinb_feature_config_fixture_dir, "outputs")
+zinb_feature_config_run <- run_script(
+  "zinb_stepwise_cv.R",
+  args = c(
+    sprintf("--output-dir=%s", zinb_feature_config_out),
+    "--folds=2",
+    "--inner-folds=2",
+    "--max-vars=1",
+    "--metric=rmse",
+    "--zero-formula=1"
+  ),
+  env = c(sprintf("CONFIG_PATH=%s", zinb_feature_config_path))
+)
+zinb_feature_overview <- read_csv_if_exists(file.path(zinb_feature_config_out, "zinb_dataset_overview.csv"))
+zinb_feature_config_path_out <- file.path(zinb_feature_config_out, "resolved_config.rds")
+zinb_feature_config <- if (file.exists(zinb_feature_config_path_out)) readRDS(zinb_feature_config_path_out) else NULL
+zinb_feature_config_ok <- zinb_feature_config_run$status == 0 &&
+  !is.null(zinb_feature_overview) &&
+  !is.null(zinb_feature_config) &&
+  identical(as.integer(zinb_feature_overview$n_features[[1]]), 1L) &&
+  identical(as.character(zinb_feature_overview$feature_list[[1]]), "prcrank") &&
+  identical(as.character(zinb_feature_config$feature_cols), "prcrank") &&
+  setequal(as.character(zinb_feature_config$experiment_feature_cols), c("prcrank", "potenzielle_kunden", "unfalldeckung"))
+
+tests[[length(tests) + 1L]] <- record_test(
+  "zinb_uses_config_specific_feature_subset",
+  zinb_feature_config_ok,
+  if (zinb_feature_config_ok) {
+    "zinb_stepwise_cv.R uses CONFIG$zinb$feature_cols without changing global experiment features"
+  } else {
+    paste("zinb_stepwise_cv.R did not honor CONFIG$zinb$feature_cols:", zinb_feature_config_run$output)
+  }
+)
+
+# zinb_stepwise_cv.R should consider factor() candidates for low-cardinality numeric features
 zinb_factor_fixture_dir <- file.path(TEST_OUTPUT_DIR, "zinb_factor_fixture")
 unlink(zinb_factor_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(zinb_factor_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -524,7 +1101,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 10. zinb_stepwise_cv.R should allow explicit numeric-as-factor variable overrides
+# zinb_stepwise_cv.R should allow explicit numeric-as-factor variable overrides
 zinb_factor_override_fixture_dir <- file.path(TEST_OUTPUT_DIR, "zinb_factor_override_fixture")
 unlink(zinb_factor_override_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(zinb_factor_override_fixture_dir, recursive = TRUE, showWarnings = FALSE)

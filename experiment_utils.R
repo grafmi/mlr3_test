@@ -78,6 +78,23 @@ get_numeric_setting <- function(arg_name, env_name, default, min_value = NULL) {
   value
 }
 
+get_optional_numeric_setting <- function(arg_name, env_name, default = NA_real_, min_value = NULL) {
+  raw_value <- get_setting(arg_name, env_name, default)
+  raw_value_chr <- trimws(as.character(raw_value))
+  if (is.na(raw_value_chr) || !nzchar(raw_value_chr) || tolower(raw_value_chr) %in% c("na", "null", "none")) {
+    return(NA_real_)
+  }
+
+  value <- suppressWarnings(as.numeric(raw_value_chr))
+  if (is.na(value)) {
+    stop(sprintf("Setting '%s' must be numeric or NA.", arg_name), call. = FALSE)
+  }
+  if (!is.null(min_value) && value < min_value) {
+    stop(sprintf("Setting '%s' must be at least %s when provided.", arg_name, min_value), call. = FALSE)
+  }
+  value
+}
+
 is_absolute_path <- function(path) {
   grepl("^(/|[A-Za-z]:[/\\\\]|~)", path)
 }
@@ -345,6 +362,144 @@ validate_columns <- function(df, target, feature_cols, id_cols = character(0)) {
   }
 }
 
+warn_if_duplicate_id_rows <- function(dt, id_cols = character(0), context = "modeling data") {
+  id_cols <- unique(id_cols[nzchar(id_cols)])
+  if (length(id_cols) == 0) return(invisible(NULL))
+
+  missing_id_cols <- setdiff(id_cols, names(dt))
+  if (length(missing_id_cols) > 0) {
+    log_info(
+      "Warning: ID_COLS not found in ",
+      context,
+      " and could not be checked for grouped-CV leakage: ",
+      paste(missing_id_cols, collapse = ", ")
+    )
+  }
+
+  available_id_cols <- intersect(id_cols, names(dt))
+  if (length(available_id_cols) == 0 || nrow(dt) == 0) return(invisible(NULL))
+
+  id_dt <- dt[, ..available_id_cols]
+  n_unique_ids <- data.table::uniqueN(id_dt, na.rm = FALSE)
+  n_duplicate_rows <- nrow(dt) - n_unique_ids
+  if (n_duplicate_rows > 0) {
+    log_info(
+      "Warning: ID column(s) have repeated value combinations in ",
+      context,
+      " (",
+      n_duplicate_rows,
+      " row(s) beyond the first occurrence across ",
+      paste(available_id_cols, collapse = ", "),
+      "). Standard row-wise CV may leak grouped entities; consider grouped CV or aggregation for real data."
+    )
+  }
+
+  invisible(NULL)
+}
+
+warn_if_missing_drop_high <- function(rows_before, rows_dropped, warn_fraction = NA_real_,
+                                      context = "modeling data") {
+  if (is.null(warn_fraction) || is.na(warn_fraction) || !is.finite(warn_fraction)) {
+    return(invisible(NULL))
+  }
+  if (rows_before <= 0 || rows_dropped <= 0) return(invisible(NULL))
+
+  drop_fraction <- rows_dropped / rows_before
+  if (drop_fraction > warn_fraction) {
+    log_info(
+      "Warning: Dropped ",
+      rows_dropped,
+      " of ",
+      rows_before,
+      " row(s) with missing values in ",
+      context,
+      " (",
+      sprintf("%.2f%%", 100 * drop_fraction),
+      "), above configured warning threshold ",
+      sprintf("%.2f%%", 100 * warn_fraction),
+      ". Check whether missingness changes the modeled population."
+    )
+  }
+
+  invisible(NULL)
+}
+
+warn_if_small_cv_folds <- function(n_rows, n_folds, min_rows_per_fold = 10L,
+                                   context = "modeling data") {
+  if (is.na(n_rows) || is.na(n_folds) || n_folds < 2L) return(invisible(NULL))
+  fold_size_floor <- floor(n_rows / n_folds)
+  fold_size_ceiling <- ceiling(n_rows / n_folds)
+  if (fold_size_floor < min_rows_per_fold) {
+    log_info(
+      "Warning: Small validation folds for ",
+      context,
+      " (",
+      n_rows,
+      " row(s), ",
+      n_folds,
+      " fold(s), approximately ",
+      fold_size_floor,
+      "-",
+      fold_size_ceiling,
+      " row(s) per fold). CV metrics may be unstable after filtering."
+    )
+  }
+
+  invisible(NULL)
+}
+
+warn_if_low_information_features <- function(dt, feature_cols, near_constant_unique_max = 2L,
+                                             near_constant_dominance = 0.95,
+                                             context = "modeling data") {
+  feature_cols <- intersect(feature_cols, names(dt))
+  if (length(feature_cols) == 0 || nrow(dt) == 0) return(invisible(NULL))
+
+  constant_features <- character(0)
+  near_constant_features <- character(0)
+
+  for (col in feature_cols) {
+    values <- dt[[col]]
+    non_missing <- values[!is.na(values)]
+    n_unique <- data.table::uniqueN(non_missing)
+    if (n_unique <= 1L) {
+      constant_features <- c(constant_features, col)
+      next
+    }
+
+    if (is.numeric(values) && n_unique <= near_constant_unique_max && length(non_missing) > 0) {
+      counts <- table(non_missing, useNA = "no")
+      dominance <- max(counts) / length(non_missing)
+      if (dominance >= near_constant_dominance) {
+        near_constant_features <- c(
+          near_constant_features,
+          sprintf("%s (%s unique, dominant value %.1f%%)", col, n_unique, 100 * dominance)
+        )
+      }
+    }
+  }
+
+  if (length(constant_features) > 0) {
+    log_info(
+      "Warning: Constant feature(s) found in ",
+      context,
+      ": ",
+      paste(constant_features, collapse = ", "),
+      ". They add no predictive information and may make model diagnostics harder to interpret."
+    )
+  }
+  if (length(near_constant_features) > 0) {
+    log_info(
+      "Warning: Near-constant numeric feature(s) found in ",
+      context,
+      ": ",
+      paste(near_constant_features, collapse = ", "),
+      ". Check whether these predictors are useful after filtering."
+    )
+  }
+
+  invisible(NULL)
+}
+
 formula_referenced_columns <- function(rhs, label = "Formula") {
   rhs <- trimws(rhs)
   if (!nzchar(rhs)) return(character(0))
@@ -403,7 +558,8 @@ apply_row_filter_checked <- function(dt, filter_expression, label = "Row filter"
 
 prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(0),
                                   require_count_target = FALSE, row_filter = "",
-                                  extra_feature_cols = character(0)) {
+                                  extra_feature_cols = character(0),
+                                  missing_drop_warn_fraction = NA_real_) {
   validate_columns(df, target, feature_cols, id_cols)
   extra_feature_cols <- unique(extra_feature_cols[nzchar(extra_feature_cols)])
   missing_extra <- setdiff(extra_feature_cols, names(df))
@@ -417,6 +573,8 @@ prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(
   if (filter_result$rows_removed > 0) {
     log_info("Dropped ", filter_result$rows_removed, " row(s) via modeling row filter.")
   }
+
+  warn_if_duplicate_id_rows(dt, id_cols = id_cols, context = "modeling data after row filtering")
 
   keep_cols <- setdiff(c(target, feature_cols, extra_feature_cols), id_cols)
   dt <- dt[, ..keep_cols]
@@ -441,6 +599,12 @@ prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(
   rows_dropped <- rows_before - nrow(dt)
   if (rows_dropped > 0) {
     log_info("Dropped ", rows_dropped, " row(s) with missing values.")
+    warn_if_missing_drop_high(
+      rows_before = rows_before,
+      rows_dropped = rows_dropped,
+      warn_fraction = missing_drop_warn_fraction,
+      context = "modeling data"
+    )
   }
   if (nrow(dt) == 0) stop("No rows remain after removing missing values.", call. = FALSE)
 
@@ -608,13 +772,65 @@ make_regr_task <- function(id, backend, target, stratum_col = ".target_stratum")
   task
 }
 
-encode_factor_features <- function(dt, target) {
-  feature_cols <- setdiff(names(dt), target)
-  factor_cols <- names(which(vapply(dt[, ..feature_cols], is.factor, logical(1))))
-  if (length(factor_cols) == 0) return(dt)
+encode_features_train_test <- function(train_dt, test_dt, target, unseen_level = ".__unseen__") {
+  train_encoded_source <- data.table::as.data.table(data.table::copy(train_dt))
+  test_encoded_source <- data.table::as.data.table(data.table::copy(test_dt))
+  feature_cols <- setdiff(names(train_encoded_source), target)
+  if (length(feature_cols) == 0) {
+    stop("At least one predictor is required for feature encoding.", call. = FALSE)
+  }
 
-  x <- stats::model.matrix(stats::reformulate(feature_cols, intercept = FALSE), data = as.data.frame(dt))
-  data.table::data.table(dt[, ..target], data.table::as.data.table(x, check.names = TRUE))
+  factor_cols <- names(which(vapply(train_encoded_source[, ..feature_cols], function(x) {
+    is.factor(x) || is.character(x)
+  }, logical(1))))
+  unseen_rows <- list()
+
+  for (col in factor_cols) {
+    train_values <- droplevels(factor(train_encoded_source[[col]]))
+    train_levels <- levels(train_values)
+    if (length(train_levels) == 0) {
+      stop("Training fold has no observed levels for factor feature: ", col, call. = FALSE)
+    }
+
+    sentinel <- unseen_level
+    while (sentinel %in% train_levels) {
+      sentinel <- paste0(sentinel, "_")
+    }
+    model_levels <- c(train_levels, sentinel)
+
+    train_encoded_source[[col]] <- factor(as.character(train_encoded_source[[col]]), levels = model_levels)
+
+    test_values <- as.character(test_encoded_source[[col]])
+    unseen <- !is.na(test_values) & !(test_values %in% train_levels)
+    if (any(unseen)) {
+      unseen_rows[[length(unseen_rows) + 1L]] <- data.table::data.table(
+        feature = col,
+        unseen_level = sort(unique(test_values[unseen])),
+        n_rows = as.integer(tabulate(match(test_values[unseen], sort(unique(test_values[unseen])))))
+      )
+      test_values[unseen] <- sentinel
+    }
+    test_encoded_source[[col]] <- factor(test_values, levels = model_levels)
+  }
+
+  rhs <- stats::reformulate(feature_cols, intercept = FALSE)
+  train_x <- stats::model.matrix(rhs, data = as.data.frame(train_encoded_source))
+  test_x <- stats::model.matrix(rhs, data = as.data.frame(test_encoded_source))
+  encoded_feature_names <- make.names(colnames(train_x), unique = TRUE)
+  colnames(train_x) <- encoded_feature_names
+  colnames(test_x) <- encoded_feature_names
+
+  encoded_train <- data.table::data.table(train_encoded_source[, ..target], data.table::as.data.table(train_x))
+  encoded_test <- data.table::data.table(test_encoded_source[, ..target], data.table::as.data.table(test_x))
+  unseen_dt <- data.table::rbindlist(unseen_rows, fill = TRUE)
+
+  list(
+    train = encoded_train,
+    test = encoded_test,
+    feature_names = encoded_feature_names,
+    factor_cols = factor_cols,
+    unseen_levels = unseen_dt
+  )
 }
 
 collect_tuning_results <- function(rr, measure_col = "regr.rmse") {
@@ -788,6 +1004,134 @@ run_repeated_autotuner_outer_cv <- function(task, auto_tuner, target, n_folds,
   )
 }
 
+run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
+                                                    n_folds, outer_repeats = 1L,
+                                                    seed, n_bins = 10,
+                                                    task_id = "encoded_regression",
+                                                    progress_prefix = NULL,
+                                                    measure_col = "regr.rmse") {
+  if (outer_repeats < 1L) {
+    stop("outer_repeats must be at least 1.", call. = FALSE)
+  }
+
+  raw_dt <- data.table::as.data.table(data.table::copy(raw_dt))
+  predictions_by_repeat <- vector("list", outer_repeats)
+  tuning_by_repeat <- vector("list", outer_repeats)
+  learners_by_repeat <- vector("list", outer_repeats)
+  unseen_by_repeat <- vector("list", outer_repeats)
+  include_repeat <- outer_repeats > 1L
+
+  log_progress <- function(...) {
+    if (!is.null(progress_prefix) && nzchar(progress_prefix)) {
+      log_info(progress_prefix, ": ", ...)
+    } else {
+      log_info(...)
+    }
+  }
+
+  for (repeat_idx in seq_len(outer_repeats)) {
+    repeat_seed <- as.integer(seed) + (repeat_idx - 1L) * 1000L
+    fold_ids <- make_stratified_fold_ids(raw_dt[[target]], nfolds = n_folds, seed = repeat_seed, n_bins = n_bins)
+    prediction_rows <- vector("list", n_folds)
+    tuning_rows <- vector("list", n_folds)
+    fitted_learners <- vector("list", n_folds)
+    unseen_rows <- vector("list", n_folds)
+
+    log_progress(
+      if (include_repeat) paste0("repeat ", repeat_idx, ": ") else "",
+      "starting encoded outer CV across ", n_folds, " fold(s)"
+    )
+
+    for (fold in seq_len(n_folds)) {
+      fold_started_at <- Sys.time()
+      train_ids <- which(fold_ids != fold)
+      test_ids <- which(fold_ids == fold)
+      log_progress(
+        if (include_repeat) paste0("repeat ", repeat_idx, ", ") else "",
+        "outer fold ", fold, "/", n_folds,
+        ": train rows=", length(train_ids),
+        ", test rows=", length(test_ids)
+      )
+
+      encoded <- encode_features_train_test(raw_dt[train_ids], raw_dt[test_ids], target = target)
+      train_task <- mlr3::TaskRegr$new(
+        id = sprintf("%s_train_r%s_f%s", task_id, repeat_idx, fold),
+        backend = as.data.frame(encoded$train),
+        target = target
+      )
+      test_task <- mlr3::TaskRegr$new(
+        id = sprintf("%s_test_r%s_f%s", task_id, repeat_idx, fold),
+        backend = as.data.frame(encoded$test),
+        target = target
+      )
+
+      at_fold <- auto_tuner$clone(deep = TRUE)
+      set.seed(repeat_seed + fold - 1L)
+      at_fold$train(train_task)
+      pred <- at_fold$predict(test_task)
+
+      prediction_rows[[fold]] <- data.table::data.table(
+        row_id = test_ids,
+        fold = fold,
+        truth = pred$truth,
+        response = pred$response,
+        error = pred$response - pred$truth,
+        abs_error = abs(pred$response - pred$truth)
+      )
+      if (include_repeat) {
+        prediction_rows[[fold]][, "repeat" := as.integer(repeat_idx)]
+        data.table::setcolorder(prediction_rows[[fold]], c("repeat", setdiff(names(prediction_rows[[fold]]), "repeat")))
+      }
+
+      tuning_rows[[fold]] <- collect_tuning_result_from_learner(
+        at_fold,
+        outer_fold = fold,
+        measure_col = measure_col,
+        repeat_id = if (include_repeat) repeat_idx else NULL
+      )
+      fitted_learners[[fold]] <- at_fold
+
+      if (nrow(encoded$unseen_levels) > 0) {
+        unseen <- data.table::copy(encoded$unseen_levels)
+        unseen[, outer_fold := fold]
+        if (include_repeat) unseen[, "repeat" := as.integer(repeat_idx)]
+        unseen_rows[[fold]] <- unseen
+      }
+
+      log_progress(
+        if (include_repeat) paste0("repeat ", repeat_idx, ", ") else "",
+        "outer fold ", fold, "/", n_folds,
+        " finished in ",
+        format(round(as.numeric(difftime(Sys.time(), fold_started_at, units = "secs")), 2), nsmall = 2),
+        "s"
+      )
+    }
+
+    predictions_by_repeat[[repeat_idx]] <- data.table::rbindlist(prediction_rows, fill = TRUE)
+    tuning_by_repeat[[repeat_idx]] <- data.table::rbindlist(tuning_rows, fill = TRUE)
+    learners_by_repeat[[repeat_idx]] <- fitted_learners
+    unseen_by_repeat[[repeat_idx]] <- data.table::rbindlist(unseen_rows, fill = TRUE)
+  }
+
+  predictions <- data.table::rbindlist(predictions_by_repeat, fill = TRUE)
+  tuning_results <- data.table::rbindlist(tuning_by_repeat, fill = TRUE)
+  unseen_levels <- data.table::rbindlist(unseen_by_repeat, fill = TRUE)
+  if (nrow(tuning_results) > 0) {
+    if ("repeat" %in% names(tuning_results)) {
+      data.table::setcolorder(tuning_results, c("repeat", "outer_fold", setdiff(names(tuning_results), c("repeat", "outer_fold"))))
+    } else {
+      data.table::setcolorder(tuning_results, c("outer_fold", setdiff(names(tuning_results), "outer_fold")))
+    }
+  }
+
+  list(
+    predictions = predictions,
+    tuning_results = tuning_results,
+    learners = learners_by_repeat,
+    unseen_levels = unseen_levels
+  )
+}
+
 safe_write_csv <- function(dt, path) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   data.table::fwrite(dt, path)
@@ -866,6 +1210,19 @@ write_config_snapshot <- function(output_dir, resolved_config, prefix = "resolve
   )
 }
 
+write_session_info <- function(output_dir, prefix = "session_info") {
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  old_tz <- Sys.getenv("TZ", unset = NA_character_)
+  if (is.na(old_tz) || !nzchar(old_tz)) {
+    Sys.setenv(TZ = "UTC")
+    on.exit(Sys.unsetenv("TZ"), add = TRUE)
+  }
+  write_text_file(
+    file.path(output_dir, paste0(prefix, ".txt")),
+    capture.output(suppressWarnings(utils::sessionInfo()))
+  )
+}
+
 dataset_overview <- function(dt, target = NULL, feature_cols = character(0), id_cols = character(0)) {
   factor_cols <- names(which(vapply(dt, is.factor, logical(1))))
   numeric_cols <- names(which(vapply(dt, is.numeric, logical(1))))
@@ -899,6 +1256,33 @@ log_dataset_overview <- function(dt, target = NULL, feature_cols = character(0),
     }
   }
   invisible(overview)
+}
+
+data_dictionary <- function(dt, target = NULL, feature_cols = character(0), id_cols = character(0)) {
+  roles_for_column <- function(col) {
+    roles <- character(0)
+    if (!is.null(target) && identical(col, target)) roles <- c(roles, "target")
+    if (col %in% feature_cols) roles <- c(roles, "feature")
+    if (col %in% id_cols) roles <- c(roles, "id")
+    if (length(roles) == 0) roles <- "other"
+    paste(roles, collapse = ", ")
+  }
+
+  data.table::rbindlist(lapply(names(dt), function(col) {
+    values <- dt[[col]]
+    data.table::data.table(
+      column = col,
+      role = roles_for_column(col),
+      class = paste(class(values), collapse = ", "),
+      typeof = typeof(values),
+      n_missing = sum(is.na(values)),
+      pct_missing = mean(is.na(values)),
+      n_unique = data.table::uniqueN(values, na.rm = FALSE),
+      is_numeric = is.numeric(values),
+      is_factor = is.factor(values),
+      is_character = is.character(values)
+    )
+  }), fill = TRUE)
 }
 
 append_registry_entry <- function(registry_path, row_dt, key_cols = "run_id") {
@@ -985,6 +1369,9 @@ manifest_status_summary <- function(output_dir, required_files = character(0)) {
       status <- "incomplete_outputs"
       reason <- "required files exist but run manifest is missing"
     }
+  } else if (identical(manifest_status, "skipped")) {
+    status <- "skipped"
+    reason <- "run intentionally skipped"
   } else if (!identical(manifest_status, "completed")) {
     status <- "failed_run"
     reason <- sprintf("run manifest status is '%s'", manifest_status)
@@ -1008,6 +1395,7 @@ finalize_run <- function(log_state, output_dir, script_name, repo_dir,
                          feature_cols = character(0), n_workers = NA,
                          run_name = NA_character_) {
   manifest_error <- NULL
+  session_info_error <- NULL
 
   tryCatch(
     invisible(write_run_manifest(
@@ -1029,8 +1417,19 @@ finalize_run <- function(log_state, output_dir, script_name, repo_dir,
     }
   )
 
+  tryCatch(
+    invisible(write_session_info(output_dir)),
+    error = function(e) {
+      session_info_error <<- conditionMessage(e)
+      NULL
+    }
+  )
+
   if (!is.null(manifest_error)) {
     log_info("Warning: failed to write run_manifest: ", manifest_error)
+  }
+  if (!is.null(session_info_error)) {
+    log_info("Warning: failed to write session_info: ", session_info_error)
   }
 
   stop_logging(log_state, status = status)

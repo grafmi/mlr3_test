@@ -67,7 +67,18 @@ INNER_FOLDS <- get_int_setting("inner-folds", "INNER_FOLDS", config_value(CONFIG
 OUTER_REPEATS <- get_int_setting("outer-repeats", "OUTER_REPEATS", config_value_or(CONFIG, c("experiment", "outer_repeats"), 1L), min_value = 1)
 SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
 TUNE_EVALS <- get_int_setting("tune-evals", "TUNE_EVALS", config_value(CONFIG, c("xgboost", "tune_evals")), min_value = 1)
+TUNE_BATCH_SIZE <- get_int_setting(
+  "tune-batch-size", "XGB_TUNE_BATCH_SIZE",
+  get_setting("tune-batch-size", "TUNE_BATCH_SIZE", config_value_or(CONFIG, c("xgboost", "tune_batch_size"), 1L)),
+  min_value = 1
+)
+EFFECTIVE_TUNE_BATCH_SIZE <- min(TUNE_BATCH_SIZE, TUNE_EVALS)
 STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", config_value(CONFIG, c("experiment", "strata_bins")), min_value = 2)
+MISSING_DROP_WARN_FRACTION <- get_optional_numeric_setting(
+  "missing-drop-warn-fraction", "MISSING_DROP_WARN_FRACTION",
+  config_value_or(CONFIG, c("experiment", "missing_drop_warn_fraction"), 0.05),
+  min_value = 0
+)
 N_WORKERS <- get_int_setting("workers", "N_WORKERS", config_value(CONFIG, c("experiment", "n_workers")), min_value = 1)
 
 # =========================
@@ -87,10 +98,15 @@ with_run_finalizer({
     future::plan(future::sequential)
   }
   on.exit(future::plan(future::sequential), add = TRUE)
+  EFFECTIVE_FUTURE_WORKERS <- future::nbrOfWorkers()
 
   df <- load_csv_checked(DATA_PATH)
-  work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS, row_filter = ROW_FILTER)
-  work_dt <- encode_factor_features(work_dt, TARGET)
+  work_dt <- prepare_modeling_data(
+    df, TARGET, FEATURE_COLS, ID_COLS,
+    row_filter = ROW_FILTER,
+    missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
+  )
+  full_data_encoded <- encode_features_train_test(work_dt, work_dt, target = TARGET)$train
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
   resolved_config <- list(
     script_name = SCRIPT_NAME,
@@ -106,8 +122,13 @@ with_run_finalizer({
     inner_folds = INNER_FOLDS,
     outer_repeats = OUTER_REPEATS,
     strata_bins = STRATA_BINS,
+    missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION,
     tune_evals = TUNE_EVALS,
-    n_workers = N_WORKERS
+    tune_batch_size = TUNE_BATCH_SIZE,
+    effective_tune_batch_size = EFFECTIVE_TUNE_BATCH_SIZE,
+    n_workers = N_WORKERS,
+    future_workers = EFFECTIVE_FUTURE_WORKERS,
+    xgb_nthread = 1L
   )
   write_config_snapshot(OUTPUT_DIR, resolved_config)
 
@@ -116,24 +137,26 @@ with_run_finalizer({
   if (!is.na(RUN_NAME)) log_info("Run name: ", RUN_NAME)
   if (nzchar(trimws(ROW_FILTER))) log_info("Using row filter: ", ROW_FILTER)
   log_dataset_overview(
-    work_dt,
+    full_data_encoded,
     target = TARGET,
-    feature_cols = setdiff(names(work_dt), TARGET),
+    feature_cols = setdiff(names(full_data_encoded), TARGET),
     id_cols = ID_COLS,
     metric = "rmse",
     extra = list(
       "Original feature columns" = paste(FEATURE_COLS, collapse = ", "),
+      "Feature encoding" = "train-fold one-hot encoding for outer CV",
       "Outer repeats" = OUTER_REPEATS,
       "Outer folds / inner folds" = paste(N_FOLDS, INNER_FOLDS, sep = " / "),
+      "Missing-drop warn fraction" = if (is.na(MISSING_DROP_WARN_FRACTION)) "<disabled>" else MISSING_DROP_WARN_FRACTION,
       "Tuning evals" = TUNE_EVALS,
-      "Workers" = N_WORKERS
+      "Tune batch size" = EFFECTIVE_TUNE_BATCH_SIZE,
+      "Configured workers" = N_WORKERS,
+      "Future workers" = EFFECTIVE_FUTURE_WORKERS,
+      "XGBoost nthread" = 1L
     )
   )
-  overview_dt <- dataset_overview(work_dt, target = TARGET, feature_cols = setdiff(names(work_dt), TARGET), id_cols = ID_COLS)
+  overview_dt <- dataset_overview(full_data_encoded, target = TARGET, feature_cols = setdiff(names(full_data_encoded), TARGET), id_cols = ID_COLS)
   safe_write_csv(overview_dt, file.path(OUTPUT_DIR, "xgb_dataset_overview.csv"))
-
-  backend <- add_regression_stratum(as.data.frame(work_dt), target = TARGET, n_bins = STRATA_BINS)
-  task <- make_regr_task("xgb_regression", backend = backend, target = TARGET)
 
   learner <- lrn(
     "regr.xgboost",
@@ -191,7 +214,7 @@ with_run_finalizer({
   inner_cv <- rsmp("cv", folds = INNER_FOLDS)
 
   at <- auto_tuner(
-    tuner = tnr("random_search"),
+    tuner = tnr("random_search", batch_size = EFFECTIVE_TUNE_BATCH_SIZE),
     learner = learner,
     resampling = inner_cv,
     measure = msr("regr.rmse"),
@@ -201,35 +224,45 @@ with_run_finalizer({
     store_models = FALSE
   )
 
-  cv_run <- run_repeated_autotuner_outer_cv(
-    task = task,
+  cv_run <- run_repeated_encoded_autotuner_outer_cv(
+    raw_dt = work_dt,
     auto_tuner = at,
     target = TARGET,
     n_folds = N_FOLDS,
     outer_repeats = OUTER_REPEATS,
     seed = SEED,
     n_bins = STRATA_BINS,
+    task_id = "xgb_regression",
     progress_prefix = "XGBoost"
   )
   predictions <- cv_run$predictions
   fold_metrics <- fold_metrics_from_predictions(predictions)
   overall_metrics <- aggregate_predictions(predictions)
   best_params <- cv_run$tuning_results
+  unseen_levels <- cv_run$unseen_levels
 
   safe_write_csv(fold_metrics, file.path(OUTPUT_DIR, "xgb_fold_metrics.csv"))
   safe_write_csv(overall_metrics, file.path(OUTPUT_DIR, "xgb_overall_metrics.csv"))
   safe_write_csv(predictions, file.path(OUTPUT_DIR, "xgb_cv_predictions.csv"))
   safe_write_csv(best_params, file.path(OUTPUT_DIR, "xgb_best_params.csv"))
+  if (!is.null(unseen_levels) && nrow(unseen_levels) > 0) {
+    safe_write_csv(unseen_levels, file.path(OUTPUT_DIR, "xgb_unseen_factor_levels.csv"))
+  }
 
   diagnostic_artifacts <- character(0)
   diagnostic_fit <- tryCatch({
     best_param_values <- extract_param_values_from_tuning(best_params, sort_measure = "regr.rmse")
     final_learner <- learner$clone(deep = TRUE)
     final_learner$param_set$values <- modifyList(final_learner$param_set$values, best_param_values)
-    final_learner$train(task)
+    final_task <- mlr3::TaskRegr$new(
+      id = "xgb_regression_full_data_diagnostic",
+      backend = as.data.frame(full_data_encoded),
+      target = TARGET
+    )
+    final_learner$train(final_task)
 
     importance_dt <- tryCatch(
-      data.table::as.data.table(xgboost::xgb.importance(model = final_learner$model, feature_names = task$feature_names)),
+      data.table::as.data.table(xgboost::xgb.importance(model = final_learner$model, feature_names = final_task$feature_names)),
       error = function(e) NULL
     )
     if (!is.null(importance_dt) && nrow(importance_dt) > 0) {
@@ -251,13 +284,18 @@ with_run_finalizer({
     sprintf("- output_dir: `%s`", normalizePath(OUTPUT_DIR, mustWork = FALSE)),
     sprintf("- target: `%s`", TARGET),
     sprintf("- original_feature_cols: `%s`", paste(FEATURE_COLS, collapse = ", ")),
-    sprintf("- encoded_feature_count: `%s`", length(task$feature_names)),
+    sprintf("- encoded_feature_count: `%s`", length(setdiff(names(full_data_encoded), TARGET))),
+    "- feature_encoding: `one-hot encoding is learned separately inside each outer-CV training split`",
     sprintf("- seed: `%s`", SEED),
     sprintf("- outer_folds: `%s`", N_FOLDS),
     sprintf("- inner_folds: `%s`", INNER_FOLDS),
     sprintf("- outer_repeats: `%s`", OUTER_REPEATS),
     sprintf("- tune_evals: `%s`", TUNE_EVALS),
+    sprintf("- tune_batch_size: `%s`", TUNE_BATCH_SIZE),
+    sprintf("- effective_tune_batch_size: `%s`", EFFECTIVE_TUNE_BATCH_SIZE),
     sprintf("- workers: `%s`", N_WORKERS),
+    sprintf("- future_workers: `%s`", EFFECTIVE_FUTURE_WORKERS),
+    "- xgb_nthread: `1`",
     "",
     "## Dataset",
     sprintf("- rows: `%s`", overview_dt$n_rows[[1]]),
@@ -274,6 +312,7 @@ with_run_finalizer({
     "- `xgb_overall_metrics.csv` / `.rds`",
     "- `xgb_cv_predictions.csv` / `.rds`",
     "- `xgb_best_params.csv` / `.rds`",
+    "- `xgb_unseen_factor_levels.csv` / `.rds` when unseen outer-test factor levels occur",
     "- `resolved_config.txt` / `.rds`",
     "- `run_manifest.csv` / `.rds`"
   )

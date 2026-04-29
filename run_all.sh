@@ -54,6 +54,7 @@ RUN_NAME="${RUN_NAME:-$CONFIG_RUN_NAME_VALUE}"
 RUN_ID="${RUN_ID:-}"
 RESULTS_ROOT_DIR="${RESULTS_ROOT_DIR:-$CONFIG_RESULTS_ROOT_DIR}"
 RUN_OUTPUT_ROOT="${RUN_OUTPUT_ROOT:-}"
+RUN_ZINB="${RUN_ZINB:-true}"
 
 next_available_run_id() {
   local base_id="$1"
@@ -68,6 +69,21 @@ next_available_run_id() {
 
   printf '%s\n' "$candidate"
 }
+
+normalize_bool() {
+  local name="$1"
+  local value="${2,,}"
+  case "$value" in
+    true|1|yes|y) printf 'true\n' ;;
+    false|0|no|n) printf 'false\n' ;;
+    *)
+      echo "Error: $name must be true or false, got: $2" >&2
+      exit 1
+      ;;
+  esac
+}
+
+RUN_ZINB="$(normalize_bool "RUN_ZINB" "$RUN_ZINB")"
 
 if [[ -z "$RUN_ID" && "$VERSION_RUNS" == "true" ]]; then
   RUN_ID="$(date '+%Y%m%d_%H%M')"
@@ -89,7 +105,11 @@ MLR3_DATA_PATH="${MLR3_DATA_PATH:-$CONFIG_DATA_PATH_VALUE}"
 RANGER_OUTPUT_DIR="${RANGER_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_ranger}"
 XGB_OUTPUT_DIR="${XGB_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_xgb}"
 ZINB_OUTPUT_DIR="${ZINB_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_zinb}"
+if [[ "$RUN_ZINB" == "false" ]]; then
+  ZINB_OUTPUT_DIR="$RUN_OUTPUT_ROOT/outputs_zinb_skipped"
+fi
 COMPARISON_OUTPUT_DIR="${COMPARISON_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_model_comparison}"
+VALIDATION_OUTPUT_DIR="${VALIDATION_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_validation}"
 RUN_SUMMARY_OUTPUT_DIR="${RUN_SUMMARY_OUTPUT_DIR:-$RUN_OUTPUT_ROOT}"
 
 run_step() {
@@ -97,6 +117,30 @@ run_step() {
   shift
   printf '\n[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$label"
   "$@"
+}
+
+write_skipped_zinb_manifest() {
+  Rscript - "$SCRIPT_DIR" "$ZINB_OUTPUT_DIR" "$RUN_NAME" "$MLR3_DATA_PATH" <<'RS'
+args <- commandArgs(trailingOnly = TRUE)
+repo_dir <- args[[1]]
+output_dir <- args[[2]]
+run_name <- args[[3]]
+data_path <- args[[4]]
+
+sys.source(file.path(repo_dir, "experiment_utils.R"), envir = environment())
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+log_state <- list(started_at = Sys.time())
+write_run_manifest(
+  output_dir = output_dir,
+  script_name = "zinb_stepwise_cv",
+  log_state = log_state,
+  repo_dir = repo_dir,
+  status = "skipped",
+  data_path = data_path,
+  run_name = if (nzchar(run_name)) run_name else NA_character_
+)
+write_text_file(file.path(output_dir, "README.txt"), "ZINB step skipped because RUN_ZINB=false.")
+RS
 }
 
 if [[ ! -f "$MLR3_DATA_PATH" ]]; then
@@ -108,16 +152,19 @@ export RANGER_OUTPUT_DIR
 export XGB_OUTPUT_DIR
 export ZINB_OUTPUT_DIR
 export COMPARISON_OUTPUT_DIR
+export VALIDATION_OUTPUT_DIR
 export MLR3_DATA_PATH
 export RUN_OUTPUT_ROOT
 export RUN_SUMMARY_OUTPUT_DIR
 export CONFIG_PATH
 export RUN_NAME
+export RUN_ZINB
 
 echo "Repository directory: $SCRIPT_DIR"
 echo "Config file: $CONFIG_PATH"
 echo "Data file: $MLR3_DATA_PATH"
 echo "Version runs: $VERSION_RUNS"
+echo "Run ZINB: $RUN_ZINB"
 if [[ -n "$RUN_NAME" ]]; then
   echo "Run name: $RUN_NAME"
 fi
@@ -129,11 +176,17 @@ echo "Ranger output: $RANGER_OUTPUT_DIR"
 echo "XGBoost output: $XGB_OUTPUT_DIR"
 echo "ZINB output: $ZINB_OUTPUT_DIR"
 echo "Comparison output: $COMPARISON_OUTPUT_DIR"
+echo "Validation output: $VALIDATION_OUTPUT_DIR"
 echo "Run summary output: $RUN_SUMMARY_OUTPUT_DIR"
 
+run_step "Running repository validation" Rscript "$SCRIPT_DIR/validate_repo.R"
 run_step "Running ranger tuning" Rscript "$SCRIPT_DIR/mlr3_ranger_tuning.R"
 run_step "Running xgboost tuning" Rscript "$SCRIPT_DIR/mlr3_xgb_tuning.R"
-run_step "Running ZINB stepwise CV" Rscript "$SCRIPT_DIR/zinb_stepwise_cv.R"
+if [[ "$RUN_ZINB" == "true" ]]; then
+  run_step "Running ZINB stepwise CV" Rscript "$SCRIPT_DIR/zinb_stepwise_cv.R"
+else
+  run_step "Skipping ZINB stepwise CV" write_skipped_zinb_manifest
+fi
 run_step "Comparing best models" Rscript "$SCRIPT_DIR/compare_best_models.R"
 run_step "Writing run summary" Rscript "$SCRIPT_DIR/write_run_summary.R"
 

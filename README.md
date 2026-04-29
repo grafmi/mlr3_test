@@ -26,9 +26,10 @@ Typical example:
 ```r
 CONFIG$experiment$data_path <- "/absolute/path/to/my_dataset.csv"
 CONFIG$experiment$feature_cols <- c("prcrank", "potenzielle_kunden", "unfalldeckung")
-CONFIG$experiment$seed <- 123L
-CONFIG$experiment$n_folds <- 10L
-CONFIG$experiment$inner_folds <- 5L
+  CONFIG$experiment$seed <- 123L
+  CONFIG$experiment$n_folds <- 10L
+  CONFIG$experiment$inner_folds <- 5L
+  CONFIG$experiment$missing_drop_warn_fraction <- 0.05
 ```
 
 Then run:
@@ -134,11 +135,16 @@ The file is grouped so that the most important settings appear first:
   `ranger` and `xgboost`
 - `CONFIG$experiment$outer_repeats`: optional number of repeated outer-CV runs
   for `ranger` and `xgboost`; missing values default to `1`
+- `CONFIG$experiment$missing_drop_warn_fraction`: warn when modeling drops more
+  than this fraction of rows with missing values; set to `NA` to disable
 - `CONFIG$preprocess`: preprocessing defaults and factor handling
-- `CONFIG$ranger`: ranger output directory and tuning defaults
-- `CONFIG$xgboost`: xgboost output directory and tuning defaults
-- `CONFIG$zinb`: ZINB output directory, metric, transformations, workers,
-  parallel backend, numeric-as-factor controls, and zero-inflation formula
+- `CONFIG$ranger`: ranger output directory, tuning defaults, and random-search
+  batch size
+- `CONFIG$xgboost`: xgboost output directory, tuning defaults, and random-search
+  batch size
+- `CONFIG$zinb`: optional ZINB-only feature set, output directory, metric,
+  transformations, workers, parallel backend, numeric-as-factor controls, and
+  zero-inflation formula
 - `CONFIG$comparison`: model-comparison defaults
 
 The scripts use this precedence order:
@@ -189,6 +195,19 @@ zero_inflation_formula = "same_as_count"
 zero_inflation_formula = "prcrank + log1p(potenzielle_kunden)"
 ```
 
+For faster ZINB runs on real data, `CONFIG$zinb$feature_cols` can define a
+reduced ZINB-only predictor set while ranger and XGBoost continue to use
+`CONFIG$experiment$feature_cols`:
+
+```r
+CONFIG$experiment$feature_cols <- c("prcrank", "potenzielle_kunden", "unfalldeckung", "region")
+CONFIG$zinb$feature_cols <- c("prcrank", "potenzielle_kunden")
+```
+
+Leave `CONFIG$zinb$feature_cols` empty to reuse the global experiment feature
+set. Command-line `--features` and environment variable `FEATURE_COLS` still
+override the ZINB feature set for direct `zinb_stepwise_cv.R` runs.
+
 Before the ZINB cross-validation starts, the script now validates the
 zero-inflation formula and all configured feature transformations against the
 modeling data. That catches missing columns and invalid formula terms earlier,
@@ -230,10 +249,39 @@ For Linux, you can also run the complete pipeline with:
 ```
 
 The wrapper resolves paths relative to the repository, checks that `Rscript` and
-the input data exist, then runs the four scripts in sequence.
+the input data exist, runs `validate_repo.R` as a preflight check, then runs the
+modeling and comparison scripts in sequence.
 At the end of a successful full run it also writes a small run-level summary in
 the run root directory, including a run report, config snapshot, and registry
 entry under the results root.
+
+ZINB can be skipped for faster real-data runs while still using the same
+wrapper:
+
+```sh
+RUN_ZINB=false ./run_all.sh
+```
+
+In that mode, `run_all.sh` fits ranger and XGBoost, writes a skipped ZINB
+manifest under `outputs_zinb_skipped`, and still runs the model comparison and
+run summary. The comparison marks ZINB as skipped and excludes it from ranking,
+so stale ZINB results from an earlier run are not reused accidentally.
+
+For real data, two additional guardrails are logged during validation and
+modeling:
+
+- if `na.omit()` drops more than `missing_drop_warn_fraction` of modeling rows,
+  the scripts warn that missingness may have shifted the modeled population
+- if `id_cols` are configured and repeated identifier combinations are found,
+  the scripts warn that ordinary row-wise CV may leak grouped entities and that
+  grouped CV or aggregation should be considered
+- `validate_repo.R` also warns about very small validation folds, constant or
+  near-constant predictors, and target extremes such as zero-heavy or high-maximum
+  target distributions
+- validation writes `resolved_config`, `validation_checks.csv`,
+  `validation_data_dictionary.csv`, and `validation_report.md`
+- every finalized script run writes `session_info.txt` with the R runtime and
+  package environment used for that run
 
 By default, `run_all.sh` versions each full run under a timestamped directory:
 
@@ -261,6 +309,7 @@ VERSION_RUNS=false ./run_all.sh
 RUN_ID=baseline_a ./run_all.sh
 RESULTS_ROOT_DIR=/tmp/my_results ./run_all.sh
 CONFIG_PATH=configs/my_variant.R ./run_all.sh
+RUN_ZINB=false ./run_all.sh
 ```
 
 You can also run a lightweight preflight check before a longer experiment:
@@ -287,10 +336,11 @@ Rscript preprocess_data.R --keep-cols=n_eintritte,prcrank --drop-missing-rows=tr
 Rscript preprocess_data.R --sample-rows=500 --sample-seed=123
 Rscript preprocess_data.R --chars-to-factors=true --factor-min-count=5
 Rscript mlr3_ranger_tuning.R --row-filter="split == 'train'" --features=prcrank,potenzielle_kunden
-Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5 --tune-evals=20 --workers=4
+Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5 --tune-evals=20 --tune-batch-size=4 --workers=16
 Rscript mlr3_ranger_tuning.R --outer-repeats=3 --folds=5 --inner-folds=3
-Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
+Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom --tune-batch-size=4
 Rscript zinb_stepwise_cv.R --metric=poisson_deviance --max-vars=3 --workers=4
+Rscript zinb_stepwise_cv.R --features=prcrank,potenzielle_kunden
 Rscript zinb_stepwise_cv.R --verbosity=detailed
 Rscript zinb_stepwise_cv.R --numeric-as-factor-max-levels=8
 Rscript zinb_stepwise_cv.R --numeric-as-factor-vars=age_band_num,tariff_class_num
@@ -304,11 +354,14 @@ The same settings can be controlled with environment variables, for example
 `PREPROCESS_SAMPLE_ROWS`, `PREPROCESS_SAMPLE_SEED`,
 `PREPROCESS_CHARS_TO_FACTORS`, `PREPROCESS_FACTOR_MIN_COUNT`,
 `MLR3_DATA_PATH`, `ROW_FILTER`, `N_FOLDS`, `INNER_FOLDS`, `OUTER_REPEATS`, `TUNE_EVALS`, `N_WORKERS`,
+`TUNE_BATCH_SIZE`, `RANGER_TUNE_BATCH_SIZE`, `XGB_TUNE_BATCH_SIZE`,
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
-`COMPARISON_OUTPUT_DIR`. ZINB also supports `ZINB_WORKERS`, which takes
+`COMPARISON_OUTPUT_DIR`. The full-run wrapper also supports `RUN_ZINB=false`
+to skip the ZINB step while keeping validation, ranger, XGBoost, comparison,
+and run-summary outputs. ZINB also supports `ZINB_WORKERS`, which takes
 precedence over `N_WORKERS` for that script. Additional ZINB-specific overrides
 include `ZINB_ZERO_FORMULA`, `ZINB_NUMERIC_AS_FACTOR_MAX_LEVELS`,
-`ZINB_NUMERIC_AS_FACTOR_VARS`, `ZINB_PARALLEL_BACKEND`, and
+`ZINB_NUMERIC_AS_FACTOR_VARS`, `FEATURE_COLS`, `ZINB_PARALLEL_BACKEND`, and
 `ZINB_VERBOSITY`.
 
 For ZINB parallelization, you can choose:
@@ -321,6 +374,13 @@ For ZINB parallelization, you can choose:
 
 For reproducibility, the default worker count is `1`. Increase `--workers` for
 faster mlr3 runs and for parallel ZINB candidate evaluation on Linux.
+For `ranger` and `xgboost`, `CONFIG$ranger$tune_batch_size` and
+`CONFIG$xgboost$tune_batch_size` control how many random-search parameter
+configurations are evaluated per tuner batch. With `inner_folds = 5` and
+`tune_batch_size = 4`, up to roughly `20` inner-CV jobs can be available to
+the future worker pool. Ranger still uses `num.threads = 1`, and XGBoost still
+uses `nthread = 1`, so this increases process-level parallelism rather than
+model-internal threads.
 Using a smaller `inner_folds` than `n_folds` is often a good compromise when
 you want faster tuning runs without changing the outer validation design.
 If you want a more stable validation estimate for `ranger` or `xgboost`,
@@ -343,6 +403,8 @@ count. A good starting point on an 8-core machine is often:
 ```r
 CONFIG$experiment$n_workers <- 7L
 CONFIG$zinb$workers <- 7L
+CONFIG$ranger$tune_batch_size <- 2L
+CONFIG$xgboost$tune_batch_size <- 2L
 ```
 
 On laptops or when running several jobs at once, values such as `4L` or `6L`

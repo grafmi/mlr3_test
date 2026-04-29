@@ -111,7 +111,7 @@ with_run_finalizer({
   )
   zinb_status <- manifest_status_summary(
     ZINB_DIR,
-    required_files = c("zinb_best_global_overall_metrics.csv", "zinb_best_model_per_step.csv")
+    required_files = c("zinb_best_global_overall_metrics.csv")
   )
 
   ranger_metrics <- read_csv_if_exists(file.path(RANGER_DIR, "ranger_overall_metrics.csv"))
@@ -128,6 +128,7 @@ with_run_finalizer({
 
   zinb_metrics <- read_csv_if_exists(file.path(ZINB_DIR, "zinb_best_global_overall_metrics.csv"))
   zinb_steps <- read_csv_if_exists(file.path(ZINB_DIR, "zinb_best_model_per_step.csv"))
+  zinb_final_summary <- read_csv_if_exists(file.path(ZINB_DIR, "zinb_final_model_summary.csv"))
   zinb_row <- safe_metrics_row(zinb_metrics, "zinb")
   zinb_row <- cbind(zinb_row, zinb_status[, .(availability_status, availability_reason, manifest_status)])
 
@@ -149,8 +150,19 @@ with_run_finalizer({
       best_zinb$formula,
       best_zinb$selected_terms
     )]
+  } else if (!is.null(zinb_final_summary) && nrow(zinb_final_summary) > 0) {
+    zinb_row[, details := sprintf(
+      "formula=%s; selected_terms=%s; stop_reason=%s",
+      zinb_final_summary$formula[[1]],
+      if ("selected_terms" %in% names(zinb_final_summary) && !is.na(zinb_final_summary$selected_terms[[1]])) {
+        zinb_final_summary$selected_terms[[1]]
+      } else {
+        "<baseline>"
+      },
+      if ("stop_reason" %in% names(zinb_final_summary)) zinb_final_summary$stop_reason[[1]] else NA_character_
+    )]
   } else if (!is.null(zinb_metrics) && nrow(zinb_metrics) > 0) {
-    zinb_row[, details := "intercept-only baseline; no selected step model found"]
+    zinb_row[, details := "intercept-only baseline or no selected step model found"]
   } else {
     zinb_row[, details := NA_character_]
   }
@@ -172,12 +184,17 @@ with_run_finalizer({
     stop(sprintf("METRIC_TO_RANK '%s' not found in comparison table.", METRIC_TO_RANK), call. = FALSE)
   }
 
-  if (all(is.na(comparison[[METRIC_TO_RANK]]))) {
-    stop("No comparable model metric values were found. Check the per-model output directories and run manifests.", call. = FALSE)
+  comparison[, rank := NA_integer_]
+  rankable <- comparison$availability_status == "ok" & !is.na(comparison[[METRIC_TO_RANK]])
+  if (!any(rankable)) {
+    stop("No available model metric values were found. Check the per-model output directories and run manifests.", call. = FALSE)
   }
-
-  comparison[, rank := rank_values(get(METRIC_TO_RANK), METRIC_TO_RANK)]
-  setorder(comparison, rank, model)
+  if (any(rankable)) {
+    comparison[rankable, rank := rank_values(get(METRIC_TO_RANK), METRIC_TO_RANK)]
+  }
+  comparison[, rank_missing := is.na(rank)]
+  setorder(comparison, rank_missing, rank, model)
+  comparison[, rank_missing := NULL]
   setcolorder(comparison, c(
     "rank", "model", "availability_status", "availability_reason", "manifest_status",
     "rmse", "mae", "max_error", "sae", "mse", "bias", "r2", "poisson_deviance", "negloglik", "details"

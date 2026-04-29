@@ -42,9 +42,12 @@ MAIN_PROCESS_PID <- Sys.getpid()
 # User settings
 # =========================
 TARGET <- get_setting("target", "TARGET", config_value(CONFIG, c("experiment", "target")))
+EXPERIMENT_FEATURE_COLS <- config_value(CONFIG, c("experiment", "feature_cols"))
+CONFIG_ZINB_FEATURE_COLS <- config_value_or(CONFIG, c("zinb", "feature_cols"), character(0))
+DEFAULT_ZINB_FEATURE_COLS <- if (length(CONFIG_ZINB_FEATURE_COLS) > 0) CONFIG_ZINB_FEATURE_COLS else EXPERIMENT_FEATURE_COLS
 FEATURE_COLS <- parse_csv_setting(get_setting(
   "features", "FEATURE_COLS",
-  paste(config_value(CONFIG, c("experiment", "feature_cols")), collapse = ",")
+  paste(DEFAULT_ZINB_FEATURE_COLS, collapse = ",")
 ))
 ID_COLS <- parse_csv_setting(get_setting(
   "id-cols", "ID_COLS",
@@ -62,6 +65,11 @@ N_FOLDS <- get_int_setting("folds", "N_FOLDS", config_value(CONFIG, c("experimen
 INNER_FOLDS <- get_int_setting("inner-folds", "INNER_FOLDS", config_value(CONFIG, c("experiment", "inner_folds")), min_value = 2)
 SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
 STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", config_value(CONFIG, c("experiment", "strata_bins")), min_value = 2)
+MISSING_DROP_WARN_FRACTION <- get_optional_numeric_setting(
+  "missing-drop-warn-fraction", "MISSING_DROP_WARN_FRACTION",
+  config_value_or(CONFIG, c("experiment", "missing_drop_warn_fraction"), 0.05),
+  min_value = 0
+)
 MAX_VARS <- get_numeric_setting("max-vars", "ZINB_MAX_VARS", config_value(CONFIG, c("zinb", "max_vars")), min_value = 1)
 MIN_IMPROVEMENT <- get_numeric_setting("min-improvement", "ZINB_MIN_IMPROVEMENT", config_value(CONFIG, c("zinb", "min_improvement")), min_value = 0)
 METRIC_TO_OPTIMIZE <- get_setting("metric", "METRIC_TO_OPTIMIZE", config_value(CONFIG, c("zinb", "metric")))
@@ -909,7 +917,8 @@ with_run_finalizer({
     df, TARGET, FEATURE_COLS, ID_COLS,
     require_count_target = TRUE,
     row_filter = ROW_FILTER,
-    extra_feature_cols = zero_formula_cols
+    extra_feature_cols = zero_formula_cols,
+    missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
   )
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
   resolved_config <- list(
@@ -918,6 +927,7 @@ with_run_finalizer({
     data_path = normalizePath(DATA_PATH, mustWork = FALSE),
     output_dir = normalizePath(OUTPUT_DIR, mustWork = FALSE),
     target = TARGET,
+    experiment_feature_cols = EXPERIMENT_FEATURE_COLS,
     feature_cols = FEATURE_COLS,
     id_cols = ID_COLS,
     row_filter = ROW_FILTER,
@@ -925,6 +935,7 @@ with_run_finalizer({
     n_folds = N_FOLDS,
     inner_folds = INNER_FOLDS,
     strata_bins = STRATA_BINS,
+    missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION,
     metric = METRIC_TO_OPTIMIZE,
     verbosity = ZINB_VERBOSITY,
     parallel_backend = PARALLEL_BACKEND,
@@ -943,6 +954,9 @@ with_run_finalizer({
   log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
   if (!is.na(RUN_NAME)) log_info("Run name: ", RUN_NAME)
   if (nzchar(trimws(ROW_FILTER))) log_info("Using row filter: ", ROW_FILTER)
+  if (!identical(FEATURE_COLS, EXPERIMENT_FEATURE_COLS)) {
+    log_info("Using ZINB-specific feature columns: ", paste(FEATURE_COLS, collapse = ", "))
+  }
   log_dataset_overview(
     work_dt,
     target = TARGET,
@@ -952,6 +966,7 @@ with_run_finalizer({
     extra = list(
       "Folds" = N_FOLDS,
       "Inner folds" = INNER_FOLDS,
+      "Missing-drop warn fraction" = if (is.na(MISSING_DROP_WARN_FRACTION)) "<disabled>" else MISSING_DROP_WARN_FRACTION,
       "Workers" = N_WORKERS,
       "Verbosity" = ZINB_VERBOSITY,
       "Parallel backend" = PARALLEL_BACKEND,
@@ -1153,6 +1168,7 @@ with_run_finalizer({
     sprintf("- data_path: `%s`", normalizePath(DATA_PATH, mustWork = FALSE)),
     sprintf("- output_dir: `%s`", normalizePath(OUTPUT_DIR, mustWork = FALSE)),
     sprintf("- target: `%s`", TARGET),
+    sprintf("- experiment_feature_cols: `%s`", paste(EXPERIMENT_FEATURE_COLS, collapse = ", ")),
     sprintf("- feature_cols: `%s`", paste(FEATURE_COLS, collapse = ", ")),
     sprintf("- zero_inflation_formula: `%s`", ZERO_INFLATION_FORMULA),
     sprintf("- seed: `%s`", SEED),
