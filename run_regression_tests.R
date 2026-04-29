@@ -174,10 +174,64 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 4. compare_best_models.R should report availability for missing outputs
+# 4. mlr3_xgb_tuning.R should run with factor features using fold-local encoding
+xgb_factor_fixture_dir <- file.path(TEST_OUTPUT_DIR, "xgb_factor_fixture")
+unlink(xgb_factor_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(xgb_factor_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+xgb_factor_input <- file.path(xgb_factor_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = rep(0:5, length.out = 30),
+    region = rep(c("north", "south", "west"), each = 10),
+    exposure = seq(1, 30)
+  ),
+  xgb_factor_input
+)
+
+xgb_factor_out <- file.path(xgb_factor_fixture_dir, "outputs")
+xgb_factor_run <- run_script(
+  "mlr3_xgb_tuning.R",
+  args = c(
+    sprintf("--data=%s", xgb_factor_input),
+    sprintf("--output-dir=%s", xgb_factor_out),
+    "--target=target",
+    "--features=region,exposure",
+    "--folds=2",
+    "--inner-folds=2",
+    "--tune-evals=1",
+    "--workers=1"
+  )
+)
+xgb_factor_predictions <- read_csv_if_exists(file.path(xgb_factor_out, "xgb_cv_predictions.csv"))
+xgb_factor_overall <- read_csv_if_exists(file.path(xgb_factor_out, "xgb_overall_metrics.csv"))
+xgb_factor_report <- file.path(xgb_factor_out, "xgb_model_report.md")
+xgb_factor_report_text <- if (file.exists(xgb_factor_report)) {
+  paste(readLines(xgb_factor_report, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+xgb_factor_ok <- xgb_factor_run$status == 0 &&
+  !is.null(xgb_factor_predictions) &&
+  !is.null(xgb_factor_overall) &&
+  nrow(xgb_factor_predictions) == 30 &&
+  grepl("one-hot encoding is learned separately inside each outer-CV training split", xgb_factor_report_text, fixed = TRUE)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "xgb_uses_fold_local_encoding_for_factor_features",
+  xgb_factor_ok,
+  if (xgb_factor_ok) {
+    "mlr3_xgb_tuning.R runs factor features through fold-local one-hot encoding"
+  } else {
+    paste("mlr3_xgb_tuning.R did not complete factor-feature run:", xgb_factor_run$output)
+  }
+)
+
+# 5. compare_best_models.R should report availability for missing/failed outputs
 compare_fixture_root <- file.path(TEST_OUTPUT_DIR, "compare_fixture")
 unlink(compare_fixture_root, recursive = TRUE, force = TRUE)
 dir.create(file.path(compare_fixture_root, "outputs_ranger"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(compare_fixture_root, "outputs_xgb_failed"), recursive = TRUE, showWarnings = FALSE)
 dir.create(file.path(compare_fixture_root, "outputs_model_comparison"), recursive = TRUE, showWarnings = FALSE)
 
 safe_write_csv(
@@ -195,12 +249,27 @@ safe_write_csv(
   data.table("repeat" = 1L, num.trees = 500L, regr.rmse = 1.2),
   file.path(compare_fixture_root, "outputs_ranger", "ranger_best_params.csv")
 )
+safe_write_csv(
+  data.table(script_name = "mlr3_xgb_tuning", status = "failed"),
+  file.path(compare_fixture_root, "outputs_xgb_failed", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(
+    rmse = 0.1, mae = 0.1, max_error = 0.2, sae = 0.0, mse = 0.01,
+    bias = 0.0, r2 = 0.99, poisson_deviance = 0.1, negloglik = NA_real_
+  ),
+  file.path(compare_fixture_root, "outputs_xgb_failed", "xgb_overall_metrics.csv")
+)
+safe_write_csv(
+  data.table(nrounds = 100L, regr.rmse = 0.1),
+  file.path(compare_fixture_root, "outputs_xgb_failed", "xgb_best_params.csv")
+)
 
 compare_run <- run_script(
   "compare_best_models.R",
   args = c(
     sprintf("--ranger-dir=%s", file.path(compare_fixture_root, "outputs_ranger")),
-    sprintf("--xgb-dir=%s", file.path(compare_fixture_root, "outputs_xgb_missing")),
+    sprintf("--xgb-dir=%s", file.path(compare_fixture_root, "outputs_xgb_failed")),
     sprintf("--zinb-dir=%s", file.path(compare_fixture_root, "outputs_zinb_missing")),
     sprintf("--output-dir=%s", file.path(compare_fixture_root, "outputs_model_comparison"))
   )
@@ -210,15 +279,71 @@ compare_ok <- compare_run$status == 0 &&
   !is.null(comparison_dt) &&
   all(c("availability_status", "availability_reason", "manifest_status") %in% names(comparison_dt)) &&
   "missing_directory" %in% comparison_dt$availability_status &&
-  "ranger" %in% comparison_dt$model
+  "failed_run" %in% comparison_dt$availability_status &&
+  identical(as.integer(comparison_dt[model == "ranger"]$rank[[1]]), 1L) &&
+  is.na(comparison_dt[model == "xgb"]$rank[[1]])
 
 tests[[length(tests) + 1L]] <- record_test(
-  "compare_best_models_reports_missing_inputs",
+  "compare_best_models_reports_unavailable_inputs_without_ranking_them",
   compare_ok,
   if (compare_ok) {
-    "comparison output reports missing model directories explicitly"
+    "comparison output reports unavailable models explicitly and excludes them from ranking"
   } else {
     paste("compare_best_models.R did not produce expected availability diagnostics:", compare_run$output)
+  }
+)
+
+# 4b. compare_best_models.R should allow a valid baseline-only ZINB run
+zinb_baseline_fixture_root <- file.path(TEST_OUTPUT_DIR, "compare_zinb_baseline_fixture")
+unlink(zinb_baseline_fixture_root, recursive = TRUE, force = TRUE)
+dir.create(file.path(zinb_baseline_fixture_root, "outputs_ranger"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(zinb_baseline_fixture_root, "outputs_xgb"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(zinb_baseline_fixture_root, "outputs_zinb"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(zinb_baseline_fixture_root, "outputs_model_comparison"), recursive = TRUE, showWarnings = FALSE)
+
+safe_write_csv(
+  data.table(script_name = "zinb_stepwise_cv", status = "completed"),
+  file.path(zinb_baseline_fixture_root, "outputs_zinb", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(
+    rmse = 1.1, mae = 0.7, max_error = 2.0, sae = 0.0, mse = 1.21,
+    bias = 0.0, r2 = 0.2, poisson_deviance = 0.8, negloglik = 1.5
+  ),
+  file.path(zinb_baseline_fixture_root, "outputs_zinb", "zinb_best_global_overall_metrics.csv")
+)
+safe_write_csv(
+  data.table(
+    formula = "target ~ 1 | 1",
+    selected_terms = NA_character_,
+    stop_reason = "baseline_retained"
+  ),
+  file.path(zinb_baseline_fixture_root, "outputs_zinb", "zinb_final_model_summary.csv")
+)
+
+zinb_baseline_compare_run <- run_script(
+  "compare_best_models.R",
+  args = c(
+    sprintf("--ranger-dir=%s", file.path(zinb_baseline_fixture_root, "outputs_ranger")),
+    sprintf("--xgb-dir=%s", file.path(zinb_baseline_fixture_root, "outputs_xgb")),
+    sprintf("--zinb-dir=%s", file.path(zinb_baseline_fixture_root, "outputs_zinb")),
+    sprintf("--output-dir=%s", file.path(zinb_baseline_fixture_root, "outputs_model_comparison"))
+  )
+)
+zinb_baseline_comparison <- read_csv_if_exists(file.path(zinb_baseline_fixture_root, "outputs_model_comparison", "best_models_comparison.csv"))
+zinb_baseline_ok <- zinb_baseline_compare_run$status == 0 &&
+  !is.null(zinb_baseline_comparison) &&
+  identical(as.character(zinb_baseline_comparison[model == "zinb"]$availability_status[[1]]), "ok") &&
+  identical(as.integer(zinb_baseline_comparison[model == "zinb"]$rank[[1]]), 1L) &&
+  grepl("<baseline>", zinb_baseline_comparison[model == "zinb"]$details[[1]], fixed = TRUE)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "compare_best_models_accepts_baseline_only_zinb",
+  zinb_baseline_ok,
+  if (zinb_baseline_ok) {
+    "baseline-only ZINB outputs are considered complete and comparable"
+  } else {
+    paste("compare_best_models.R did not accept baseline-only ZINB outputs:", zinb_baseline_compare_run$output)
   }
 )
 

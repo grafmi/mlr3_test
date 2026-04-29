@@ -90,7 +90,7 @@ with_run_finalizer({
 
   df <- load_csv_checked(DATA_PATH)
   work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS, row_filter = ROW_FILTER)
-  work_dt <- encode_factor_features(work_dt, TARGET)
+  full_data_encoded <- encode_features_train_test(work_dt, work_dt, target = TARGET)$train
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
   resolved_config <- list(
     script_name = SCRIPT_NAME,
@@ -116,24 +116,22 @@ with_run_finalizer({
   if (!is.na(RUN_NAME)) log_info("Run name: ", RUN_NAME)
   if (nzchar(trimws(ROW_FILTER))) log_info("Using row filter: ", ROW_FILTER)
   log_dataset_overview(
-    work_dt,
+    full_data_encoded,
     target = TARGET,
-    feature_cols = setdiff(names(work_dt), TARGET),
+    feature_cols = setdiff(names(full_data_encoded), TARGET),
     id_cols = ID_COLS,
     metric = "rmse",
     extra = list(
       "Original feature columns" = paste(FEATURE_COLS, collapse = ", "),
+      "Feature encoding" = "train-fold one-hot encoding for outer CV",
       "Outer repeats" = OUTER_REPEATS,
       "Outer folds / inner folds" = paste(N_FOLDS, INNER_FOLDS, sep = " / "),
       "Tuning evals" = TUNE_EVALS,
       "Workers" = N_WORKERS
     )
   )
-  overview_dt <- dataset_overview(work_dt, target = TARGET, feature_cols = setdiff(names(work_dt), TARGET), id_cols = ID_COLS)
+  overview_dt <- dataset_overview(full_data_encoded, target = TARGET, feature_cols = setdiff(names(full_data_encoded), TARGET), id_cols = ID_COLS)
   safe_write_csv(overview_dt, file.path(OUTPUT_DIR, "xgb_dataset_overview.csv"))
-
-  backend <- add_regression_stratum(as.data.frame(work_dt), target = TARGET, n_bins = STRATA_BINS)
-  task <- make_regr_task("xgb_regression", backend = backend, target = TARGET)
 
   learner <- lrn(
     "regr.xgboost",
@@ -201,35 +199,45 @@ with_run_finalizer({
     store_models = FALSE
   )
 
-  cv_run <- run_repeated_autotuner_outer_cv(
-    task = task,
+  cv_run <- run_repeated_encoded_autotuner_outer_cv(
+    raw_dt = work_dt,
     auto_tuner = at,
     target = TARGET,
     n_folds = N_FOLDS,
     outer_repeats = OUTER_REPEATS,
     seed = SEED,
     n_bins = STRATA_BINS,
+    task_id = "xgb_regression",
     progress_prefix = "XGBoost"
   )
   predictions <- cv_run$predictions
   fold_metrics <- fold_metrics_from_predictions(predictions)
   overall_metrics <- aggregate_predictions(predictions)
   best_params <- cv_run$tuning_results
+  unseen_levels <- cv_run$unseen_levels
 
   safe_write_csv(fold_metrics, file.path(OUTPUT_DIR, "xgb_fold_metrics.csv"))
   safe_write_csv(overall_metrics, file.path(OUTPUT_DIR, "xgb_overall_metrics.csv"))
   safe_write_csv(predictions, file.path(OUTPUT_DIR, "xgb_cv_predictions.csv"))
   safe_write_csv(best_params, file.path(OUTPUT_DIR, "xgb_best_params.csv"))
+  if (!is.null(unseen_levels) && nrow(unseen_levels) > 0) {
+    safe_write_csv(unseen_levels, file.path(OUTPUT_DIR, "xgb_unseen_factor_levels.csv"))
+  }
 
   diagnostic_artifacts <- character(0)
   diagnostic_fit <- tryCatch({
     best_param_values <- extract_param_values_from_tuning(best_params, sort_measure = "regr.rmse")
     final_learner <- learner$clone(deep = TRUE)
     final_learner$param_set$values <- modifyList(final_learner$param_set$values, best_param_values)
-    final_learner$train(task)
+    final_task <- mlr3::TaskRegr$new(
+      id = "xgb_regression_full_data_diagnostic",
+      backend = as.data.frame(full_data_encoded),
+      target = TARGET
+    )
+    final_learner$train(final_task)
 
     importance_dt <- tryCatch(
-      data.table::as.data.table(xgboost::xgb.importance(model = final_learner$model, feature_names = task$feature_names)),
+      data.table::as.data.table(xgboost::xgb.importance(model = final_learner$model, feature_names = final_task$feature_names)),
       error = function(e) NULL
     )
     if (!is.null(importance_dt) && nrow(importance_dt) > 0) {
@@ -251,7 +259,8 @@ with_run_finalizer({
     sprintf("- output_dir: `%s`", normalizePath(OUTPUT_DIR, mustWork = FALSE)),
     sprintf("- target: `%s`", TARGET),
     sprintf("- original_feature_cols: `%s`", paste(FEATURE_COLS, collapse = ", ")),
-    sprintf("- encoded_feature_count: `%s`", length(task$feature_names)),
+    sprintf("- encoded_feature_count: `%s`", length(setdiff(names(full_data_encoded), TARGET))),
+    "- feature_encoding: `one-hot encoding is learned separately inside each outer-CV training split`",
     sprintf("- seed: `%s`", SEED),
     sprintf("- outer_folds: `%s`", N_FOLDS),
     sprintf("- inner_folds: `%s`", INNER_FOLDS),
@@ -274,6 +283,7 @@ with_run_finalizer({
     "- `xgb_overall_metrics.csv` / `.rds`",
     "- `xgb_cv_predictions.csv` / `.rds`",
     "- `xgb_best_params.csv` / `.rds`",
+    "- `xgb_unseen_factor_levels.csv` / `.rds` when unseen outer-test factor levels occur",
     "- `resolved_config.txt` / `.rds`",
     "- `run_manifest.csv` / `.rds`"
   )
