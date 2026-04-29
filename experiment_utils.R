@@ -1210,6 +1210,19 @@ write_config_snapshot <- function(output_dir, resolved_config, prefix = "resolve
   )
 }
 
+write_session_info <- function(output_dir, prefix = "session_info") {
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  old_tz <- Sys.getenv("TZ", unset = NA_character_)
+  if (is.na(old_tz) || !nzchar(old_tz)) {
+    Sys.setenv(TZ = "UTC")
+    on.exit(Sys.unsetenv("TZ"), add = TRUE)
+  }
+  write_text_file(
+    file.path(output_dir, paste0(prefix, ".txt")),
+    capture.output(suppressWarnings(utils::sessionInfo()))
+  )
+}
+
 dataset_overview <- function(dt, target = NULL, feature_cols = character(0), id_cols = character(0)) {
   factor_cols <- names(which(vapply(dt, is.factor, logical(1))))
   numeric_cols <- names(which(vapply(dt, is.numeric, logical(1))))
@@ -1243,6 +1256,33 @@ log_dataset_overview <- function(dt, target = NULL, feature_cols = character(0),
     }
   }
   invisible(overview)
+}
+
+data_dictionary <- function(dt, target = NULL, feature_cols = character(0), id_cols = character(0)) {
+  roles_for_column <- function(col) {
+    roles <- character(0)
+    if (!is.null(target) && identical(col, target)) roles <- c(roles, "target")
+    if (col %in% feature_cols) roles <- c(roles, "feature")
+    if (col %in% id_cols) roles <- c(roles, "id")
+    if (length(roles) == 0) roles <- "other"
+    paste(roles, collapse = ", ")
+  }
+
+  data.table::rbindlist(lapply(names(dt), function(col) {
+    values <- dt[[col]]
+    data.table::data.table(
+      column = col,
+      role = roles_for_column(col),
+      class = paste(class(values), collapse = ", "),
+      typeof = typeof(values),
+      n_missing = sum(is.na(values)),
+      pct_missing = mean(is.na(values)),
+      n_unique = data.table::uniqueN(values, na.rm = FALSE),
+      is_numeric = is.numeric(values),
+      is_factor = is.factor(values),
+      is_character = is.character(values)
+    )
+  }), fill = TRUE)
 }
 
 append_registry_entry <- function(registry_path, row_dt, key_cols = "run_id") {
@@ -1352,6 +1392,7 @@ finalize_run <- function(log_state, output_dir, script_name, repo_dir,
                          feature_cols = character(0), n_workers = NA,
                          run_name = NA_character_) {
   manifest_error <- NULL
+  session_info_error <- NULL
 
   tryCatch(
     invisible(write_run_manifest(
@@ -1373,8 +1414,19 @@ finalize_run <- function(log_state, output_dir, script_name, repo_dir,
     }
   )
 
+  tryCatch(
+    invisible(write_session_info(output_dir)),
+    error = function(e) {
+      session_info_error <<- conditionMessage(e)
+      NULL
+    }
+  )
+
   if (!is.null(manifest_error)) {
     log_info("Warning: failed to write run_manifest: ", manifest_error)
+  }
+  if (!is.null(session_info_error)) {
+    log_info("Warning: failed to write session_info: ", session_info_error)
   }
 
   stop_logging(log_state, status = status)

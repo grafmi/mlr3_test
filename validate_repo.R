@@ -66,7 +66,23 @@ markdown_escape <- function(x) {
   x
 }
 
-write_validation_report <- function(output_dir, checks_dt, resolved_config) {
+format_dictionary_rows <- function(dictionary_dt) {
+  if (is.null(dictionary_dt) || nrow(dictionary_dt) == 0) return(character(0))
+  vapply(seq_len(nrow(dictionary_dt)), function(i) {
+    row <- dictionary_dt[i]
+    sprintf(
+      "| `%s` | `%s` | `%s` | `%s` | `%s` | `%s` |",
+      markdown_escape(row$column[[1]]),
+      markdown_escape(row$role[[1]]),
+      markdown_escape(row$class[[1]]),
+      markdown_escape(row$n_missing[[1]]),
+      markdown_escape(sprintf("%.2f%%", 100 * row$pct_missing[[1]])),
+      markdown_escape(row$n_unique[[1]])
+    )
+  }, character(1))
+}
+
+write_validation_report <- function(output_dir, checks_dt, resolved_config, dictionary_dt = NULL) {
   n_failed <- nrow(checks_dt[ok == FALSE])
   status <- if (n_failed == 0) "passed" else "failed"
   check_rows <- apply(checks_dt, 1, function(row) {
@@ -77,6 +93,18 @@ write_validation_report <- function(output_dir, checks_dt, resolved_config) {
       markdown_escape(row[["details"]])
     )
   })
+  dictionary_rows <- format_dictionary_rows(dictionary_dt)
+  dictionary_section <- if (length(dictionary_rows) > 0) {
+    c(
+      "",
+      "## Data Dictionary",
+      "| column | role | class | missing | pct_missing | unique |",
+      "|---|---|---|---:|---:|---:|",
+      dictionary_rows
+    )
+  } else {
+    character(0)
+  }
 
   report_lines <- c(
     sprintf("# %s Report", SCRIPT_NAME),
@@ -100,11 +128,51 @@ write_validation_report <- function(output_dir, checks_dt, resolved_config) {
     "| check | ok | details |",
     "|---|---:|---|",
     check_rows,
+    dictionary_section,
     "",
     "## Notes",
     "- Diagnostic warnings, such as small folds or low-information features, are written to `validate_repo.log`."
   )
   write_text_file(file.path(output_dir, "validation_report.md"), report_lines)
+}
+
+warn_if_target_extremes <- function(dt, target) {
+  if (!target %in% names(dt) || !is.numeric(dt[[target]])) return(invisible(NULL))
+
+  y <- dt[[target]]
+  y_obs <- y[!is.na(y)]
+  if (length(y_obs) == 0) return(invisible(NULL))
+
+  zero_fraction <- mean(y_obs == 0)
+  if (zero_fraction >= 0.5) {
+    log_info(
+      "Warning: Target '",
+      target,
+      "' has many zeros (",
+      sprintf("%.2f%%", 100 * zero_fraction),
+      " of non-missing rows). Check that the chosen model family and metrics match the zero-heavy target distribution."
+    )
+  }
+
+  qs <- stats::quantile(y_obs, probs = c(0.25, 0.75), na.rm = TRUE, type = 7)
+  iqr <- as.numeric(qs[[2]] - qs[[1]])
+  if (is.finite(iqr) && iqr > 0) {
+    upper_extreme_threshold <- as.numeric(qs[[2]] + 10 * iqr)
+    max_y <- max(y_obs, na.rm = TRUE)
+    if (is.finite(max_y) && max_y > upper_extreme_threshold) {
+      log_info(
+        "Warning: Target '",
+        target,
+        "' has a high maximum value (max=",
+        format(max_y, digits = 8),
+        ", Q3 + 10*IQR=",
+        format(upper_extreme_threshold, digits = 8),
+        "). Check whether extreme target values are expected real observations."
+      )
+    }
+  }
+
+  invisible(NULL)
 }
 
 check_output_dir_writable <- function(path) {
@@ -144,6 +212,7 @@ with_run_finalizer({
   )
   write_config_snapshot(OUTPUT_DIR, resolved_config)
   checks <- list()
+  validation_dictionary <- NULL
 
   missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
   checks[[length(checks) + 1L]] <- record_check(
@@ -179,6 +248,14 @@ with_run_finalizer({
     zero_formula_cols <- if (identical(zero_formula, "same_as_count")) character(0) else {
       formula_referenced_columns(zero_formula, label = "ZINB zero-formula")
     }
+    dictionary_dt <- data.table::as.data.table(data.table::copy(df))
+    dictionary_filter <- apply_row_filter_checked(dictionary_dt, ROW_FILTER, label = "Validation data-dictionary row filter")
+    dictionary_dt <- dictionary_filter$data
+    dictionary_cols <- intersect(unique(c(TARGET, FEATURE_COLS, ID_COLS, zero_formula_cols)), names(dictionary_dt))
+    dictionary_dt <- dictionary_dt[, ..dictionary_cols]
+    validation_dictionary <<- data_dictionary(dictionary_dt, target = TARGET, feature_cols = FEATURE_COLS, id_cols = ID_COLS)
+    safe_write_csv(validation_dictionary, file.path(OUTPUT_DIR, "validation_data_dictionary.csv"))
+
     work_dt <- prepare_modeling_data(
       df, TARGET, FEATURE_COLS, ID_COLS,
       require_count_target = FALSE,
@@ -193,6 +270,7 @@ with_run_finalizer({
     )
     warn_if_small_cv_folds(nrow(work_dt), N_FOLDS, context = "modeling data")
     warn_if_low_information_features(work_dt, FEATURE_COLS, context = "modeling data")
+    warn_if_target_extremes(work_dt, TARGET)
 
     if (!identical(zero_formula, "same_as_count")) {
       validate_zero_formula_rhs(zero_formula, work_dt)
@@ -211,7 +289,7 @@ with_run_finalizer({
   checks <- c(checks, dataset_check)
   checks_dt <- rbindlist(checks, fill = TRUE)
   safe_write_csv(checks_dt, file.path(OUTPUT_DIR, "validation_checks.csv"))
-  write_validation_report(OUTPUT_DIR, checks_dt, resolved_config)
+  write_validation_report(OUTPUT_DIR, checks_dt, resolved_config, dictionary_dt = validation_dictionary)
 
   failed_checks <- checks_dt[ok == FALSE]
   if (nrow(failed_checks) > 0) {

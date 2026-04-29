@@ -96,8 +96,16 @@ validate_log_path <- file.path(validate_out, "validate_repo.log")
 validate_manifest_path <- file.path(validate_out, "run_manifest.csv")
 validate_config_path <- file.path(validate_out, "resolved_config.rds")
 validate_report_path <- file.path(validate_out, "validation_report.md")
+validate_dictionary_path <- file.path(validate_out, "validation_data_dictionary.csv")
+validate_session_path <- file.path(validate_out, "session_info.txt")
 validate_report <- if (file.exists(validate_report_path)) {
   paste(readLines(validate_report_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+validate_dictionary <- read_csv_if_exists(validate_dictionary_path)
+validate_session <- if (file.exists(validate_session_path)) {
+  paste(readLines(validate_session_path, warn = FALSE), collapse = "\n")
 } else {
   ""
 }
@@ -108,14 +116,20 @@ validate_ok <- validate_run$status == 0 &&
   file.exists(validate_manifest_path) &&
   file.exists(validate_config_path) &&
   file.exists(validate_report_path) &&
+  file.exists(validate_dictionary_path) &&
+  file.exists(validate_session_path) &&
   grepl("# validate_repo Report", validate_report, fixed = TRUE) &&
-  grepl("| `required_packages` | `TRUE` |", validate_report, fixed = TRUE)
+  grepl("| `required_packages` | `TRUE` |", validate_report, fixed = TRUE) &&
+  grepl("## Data Dictionary", validate_report, fixed = TRUE) &&
+  !is.null(validate_dictionary) &&
+  all(c("column", "role", "class", "pct_missing", "n_unique") %in% names(validate_dictionary)) &&
+  grepl("R version", validate_session, fixed = TRUE)
 
 tests[[length(tests) + 1L]] <- record_test(
   "validate_repo_success",
   validate_ok,
   if (validate_ok) {
-    "validate_repo.R completed and wrote checks, log, manifest, config snapshot, and report"
+    "validate_repo.R completed and wrote checks, log, manifest, config snapshot, report, data dictionary, and session info"
   } else {
     paste("validate_repo.R failed:", validate_run$output)
   }
@@ -383,6 +397,52 @@ tests[[length(tests) + 1L]] <- record_test(
     "validate_repo.R warns about constant and near-constant predictors"
   } else {
     paste("validate_repo.R did not emit the expected low-information feature warnings:", low_info_run$output)
+  }
+)
+
+# validate_repo.R should warn about extreme target distributions
+target_extreme_fixture_dir <- file.path(TEST_OUTPUT_DIR, "target_extreme_fixture")
+unlink(target_extreme_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(target_extreme_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+target_extreme_input <- file.path(target_extreme_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = c(rep(0, 12), 1:7, 1000),
+    feature_a = seq_len(20)
+  ),
+  target_extreme_input
+)
+
+target_extreme_out <- file.path(target_extreme_fixture_dir, "outputs")
+target_extreme_run <- run_script(
+  "validate_repo.R",
+  args = c(
+    sprintf("--data=%s", target_extreme_input),
+    sprintf("--output-dir=%s", target_extreme_out),
+    "--target=target",
+    "--features=feature_a",
+    "--folds=2",
+    "--inner-folds=2"
+  )
+)
+target_extreme_log_path <- file.path(target_extreme_out, "validate_repo.log")
+target_extreme_log <- if (file.exists(target_extreme_log_path)) {
+  paste(readLines(target_extreme_log_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+target_extreme_ok <- target_extreme_run$status == 0 &&
+  grepl("Warning: Target 'target' has many zeros", target_extreme_log, fixed = TRUE) &&
+  grepl("Warning: Target 'target' has a high maximum value", target_extreme_log, fixed = TRUE)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "validate_repo_warns_on_target_extremes",
+  target_extreme_ok,
+  if (target_extreme_ok) {
+    "validate_repo.R warns about zero-heavy and high-maximum target distributions"
+  } else {
+    paste("validate_repo.R did not emit the expected target-extreme warnings:", target_extreme_run$output)
   }
 )
 
