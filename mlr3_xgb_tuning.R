@@ -68,6 +68,11 @@ OUTER_REPEATS <- get_int_setting("outer-repeats", "OUTER_REPEATS", config_value_
 SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
 TUNE_EVALS <- get_int_setting("tune-evals", "TUNE_EVALS", config_value(CONFIG, c("xgboost", "tune_evals")), min_value = 1)
 STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", config_value(CONFIG, c("experiment", "strata_bins")), min_value = 2)
+MISSING_DROP_WARN_FRACTION <- get_optional_numeric_setting(
+  "missing-drop-warn-fraction", "MISSING_DROP_WARN_FRACTION",
+  config_value_or(CONFIG, c("experiment", "missing_drop_warn_fraction"), 0.05),
+  min_value = 0
+)
 N_WORKERS <- get_int_setting("workers", "N_WORKERS", config_value(CONFIG, c("experiment", "n_workers")), min_value = 1)
 
 # =========================
@@ -89,7 +94,11 @@ with_run_finalizer({
   on.exit(future::plan(future::sequential), add = TRUE)
 
   df <- load_csv_checked(DATA_PATH)
-  work_dt <- prepare_modeling_data(df, TARGET, FEATURE_COLS, ID_COLS, row_filter = ROW_FILTER)
+  work_dt <- prepare_modeling_data(
+    df, TARGET, FEATURE_COLS, ID_COLS,
+    row_filter = ROW_FILTER,
+    missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
+  )
   full_data_encoded <- encode_features_train_test(work_dt, work_dt, target = TARGET)$train
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
   resolved_config <- list(
@@ -106,6 +115,7 @@ with_run_finalizer({
     inner_folds = INNER_FOLDS,
     outer_repeats = OUTER_REPEATS,
     strata_bins = STRATA_BINS,
+    missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION,
     tune_evals = TUNE_EVALS,
     n_workers = N_WORKERS
   )
@@ -126,6 +136,7 @@ with_run_finalizer({
       "Feature encoding" = "train-fold one-hot encoding for outer CV",
       "Outer repeats" = OUTER_REPEATS,
       "Outer folds / inner folds" = paste(N_FOLDS, INNER_FOLDS, sep = " / "),
+      "Missing-drop warn fraction" = if (is.na(MISSING_DROP_WARN_FRACTION)) "<disabled>" else MISSING_DROP_WARN_FRACTION,
       "Tuning evals" = TUNE_EVALS,
       "Workers" = N_WORKERS
     )

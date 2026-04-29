@@ -78,6 +78,23 @@ get_numeric_setting <- function(arg_name, env_name, default, min_value = NULL) {
   value
 }
 
+get_optional_numeric_setting <- function(arg_name, env_name, default = NA_real_, min_value = NULL) {
+  raw_value <- get_setting(arg_name, env_name, default)
+  raw_value_chr <- trimws(as.character(raw_value))
+  if (is.na(raw_value_chr) || !nzchar(raw_value_chr) || tolower(raw_value_chr) %in% c("na", "null", "none")) {
+    return(NA_real_)
+  }
+
+  value <- suppressWarnings(as.numeric(raw_value_chr))
+  if (is.na(value)) {
+    stop(sprintf("Setting '%s' must be numeric or NA.", arg_name), call. = FALSE)
+  }
+  if (!is.null(min_value) && value < min_value) {
+    stop(sprintf("Setting '%s' must be at least %s when provided.", arg_name, min_value), call. = FALSE)
+  }
+  value
+}
+
 is_absolute_path <- function(path) {
   grepl("^(/|[A-Za-z]:[/\\\\]|~)", path)
 }
@@ -345,6 +362,68 @@ validate_columns <- function(df, target, feature_cols, id_cols = character(0)) {
   }
 }
 
+warn_if_duplicate_id_rows <- function(dt, id_cols = character(0), context = "modeling data") {
+  id_cols <- unique(id_cols[nzchar(id_cols)])
+  if (length(id_cols) == 0) return(invisible(NULL))
+
+  missing_id_cols <- setdiff(id_cols, names(dt))
+  if (length(missing_id_cols) > 0) {
+    log_info(
+      "Warning: ID_COLS not found in ",
+      context,
+      " and could not be checked for grouped-CV leakage: ",
+      paste(missing_id_cols, collapse = ", ")
+    )
+  }
+
+  available_id_cols <- intersect(id_cols, names(dt))
+  if (length(available_id_cols) == 0 || nrow(dt) == 0) return(invisible(NULL))
+
+  id_dt <- dt[, ..available_id_cols]
+  n_unique_ids <- data.table::uniqueN(id_dt, na.rm = FALSE)
+  n_duplicate_rows <- nrow(dt) - n_unique_ids
+  if (n_duplicate_rows > 0) {
+    log_info(
+      "Warning: ID column(s) have repeated value combinations in ",
+      context,
+      " (",
+      n_duplicate_rows,
+      " row(s) beyond the first occurrence across ",
+      paste(available_id_cols, collapse = ", "),
+      "). Standard row-wise CV may leak grouped entities; consider grouped CV or aggregation for real data."
+    )
+  }
+
+  invisible(NULL)
+}
+
+warn_if_missing_drop_high <- function(rows_before, rows_dropped, warn_fraction = NA_real_,
+                                      context = "modeling data") {
+  if (is.null(warn_fraction) || is.na(warn_fraction) || !is.finite(warn_fraction)) {
+    return(invisible(NULL))
+  }
+  if (rows_before <= 0 || rows_dropped <= 0) return(invisible(NULL))
+
+  drop_fraction <- rows_dropped / rows_before
+  if (drop_fraction > warn_fraction) {
+    log_info(
+      "Warning: Dropped ",
+      rows_dropped,
+      " of ",
+      rows_before,
+      " row(s) with missing values in ",
+      context,
+      " (",
+      sprintf("%.2f%%", 100 * drop_fraction),
+      "), above configured warning threshold ",
+      sprintf("%.2f%%", 100 * warn_fraction),
+      ". Check whether missingness changes the modeled population."
+    )
+  }
+
+  invisible(NULL)
+}
+
 formula_referenced_columns <- function(rhs, label = "Formula") {
   rhs <- trimws(rhs)
   if (!nzchar(rhs)) return(character(0))
@@ -403,7 +482,8 @@ apply_row_filter_checked <- function(dt, filter_expression, label = "Row filter"
 
 prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(0),
                                   require_count_target = FALSE, row_filter = "",
-                                  extra_feature_cols = character(0)) {
+                                  extra_feature_cols = character(0),
+                                  missing_drop_warn_fraction = NA_real_) {
   validate_columns(df, target, feature_cols, id_cols)
   extra_feature_cols <- unique(extra_feature_cols[nzchar(extra_feature_cols)])
   missing_extra <- setdiff(extra_feature_cols, names(df))
@@ -417,6 +497,8 @@ prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(
   if (filter_result$rows_removed > 0) {
     log_info("Dropped ", filter_result$rows_removed, " row(s) via modeling row filter.")
   }
+
+  warn_if_duplicate_id_rows(dt, id_cols = id_cols, context = "modeling data after row filtering")
 
   keep_cols <- setdiff(c(target, feature_cols, extra_feature_cols), id_cols)
   dt <- dt[, ..keep_cols]
@@ -441,6 +523,12 @@ prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(
   rows_dropped <- rows_before - nrow(dt)
   if (rows_dropped > 0) {
     log_info("Dropped ", rows_dropped, " row(s) with missing values.")
+    warn_if_missing_drop_high(
+      rows_before = rows_before,
+      rows_dropped = rows_dropped,
+      warn_fraction = missing_drop_warn_fraction,
+      context = "modeling data"
+    )
   }
   if (nrow(dt) == 0) stop("No rows remain after removing missing values.", call. = FALSE)
 

@@ -26,9 +26,10 @@ Typical example:
 ```r
 CONFIG$experiment$data_path <- "/absolute/path/to/my_dataset.csv"
 CONFIG$experiment$feature_cols <- c("prcrank", "potenzielle_kunden", "unfalldeckung")
-CONFIG$experiment$seed <- 123L
-CONFIG$experiment$n_folds <- 10L
-CONFIG$experiment$inner_folds <- 5L
+  CONFIG$experiment$seed <- 123L
+  CONFIG$experiment$n_folds <- 10L
+  CONFIG$experiment$inner_folds <- 5L
+  CONFIG$experiment$missing_drop_warn_fraction <- 0.05
 ```
 
 Then run:
@@ -134,6 +135,8 @@ The file is grouped so that the most important settings appear first:
   `ranger` and `xgboost`
 - `CONFIG$experiment$outer_repeats`: optional number of repeated outer-CV runs
   for `ranger` and `xgboost`; missing values default to `1`
+- `CONFIG$experiment$missing_drop_warn_fraction`: warn when modeling drops more
+  than this fraction of rows with missing values; set to `NA` to disable
 - `CONFIG$preprocess`: preprocessing defaults and factor handling
 - `CONFIG$ranger`: ranger output directory and tuning defaults
 - `CONFIG$xgboost`: xgboost output directory and tuning defaults
@@ -230,10 +233,20 @@ For Linux, you can also run the complete pipeline with:
 ```
 
 The wrapper resolves paths relative to the repository, checks that `Rscript` and
-the input data exist, then runs the four scripts in sequence.
+the input data exist, runs `validate_repo.R` as a preflight check, then runs the
+modeling and comparison scripts in sequence.
 At the end of a successful full run it also writes a small run-level summary in
 the run root directory, including a run report, config snapshot, and registry
 entry under the results root.
+
+For real data, two additional guardrails are logged during validation and
+modeling:
+
+- if `na.omit()` drops more than `missing_drop_warn_fraction` of modeling rows,
+  the scripts warn that missingness may have shifted the modeled population
+- if `id_cols` are configured and repeated identifier combinations are found,
+  the scripts warn that ordinary row-wise CV may leak grouped entities and that
+  grouped CV or aggregation should be considered
 
 By default, `run_all.sh` versions each full run under a timestamped directory:
 

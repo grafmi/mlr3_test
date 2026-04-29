@@ -58,6 +58,7 @@ read_manifest_with_label <- function(output_dir, script_label) {
 }
 
 dirs <- list(
+  validation = get_path_setting("validation-dir", "VALIDATION_OUTPUT_DIR", file.path(RUN_OUTPUT_ROOT, "outputs_validation"), base_dir = REPO_DIR),
   ranger = get_path_setting("ranger-dir", "RANGER_OUTPUT_DIR", file.path(RUN_OUTPUT_ROOT, "outputs_ranger"), base_dir = REPO_DIR),
   xgb = get_path_setting("xgb-dir", "XGB_OUTPUT_DIR", file.path(RUN_OUTPUT_ROOT, "outputs_xgb"), base_dir = REPO_DIR),
   zinb = get_path_setting("zinb-dir", "ZINB_OUTPUT_DIR", file.path(RUN_OUTPUT_ROOT, "outputs_zinb"), base_dir = REPO_DIR),
@@ -65,6 +66,7 @@ dirs <- list(
 )
 
 script_summary <- rbindlist(list(
+  cbind(read_manifest_with_label(dirs$validation, "validate_repo"), data.table(output_dir = normalizePath(dirs$validation, mustWork = FALSE))),
   cbind(read_manifest_with_label(dirs$ranger, "mlr3_ranger_tuning"), data.table(output_dir = normalizePath(dirs$ranger, mustWork = FALSE))),
   cbind(read_manifest_with_label(dirs$xgb, "mlr3_xgb_tuning"), data.table(output_dir = normalizePath(dirs$xgb, mustWork = FALSE))),
   cbind(read_manifest_with_label(dirs$zinb, "zinb_stepwise_cv"), data.table(output_dir = normalizePath(dirs$zinb, mustWork = FALSE))),
@@ -122,6 +124,7 @@ run_context_dt <- data.table(
   results_root_dir = RESULTS_ROOT_DIR,
   config_path = normalizePath(CONFIG_PATH, mustWork = FALSE),
   data_path = Sys.getenv("MLR3_DATA_PATH", unset = NA_character_),
+  validation_output_dir = Sys.getenv("VALIDATION_OUTPUT_DIR", unset = NA_character_),
   ranger_output_dir = Sys.getenv("RANGER_OUTPUT_DIR", unset = NA_character_),
   xgb_output_dir = Sys.getenv("XGB_OUTPUT_DIR", unset = NA_character_),
   zinb_output_dir = Sys.getenv("ZINB_OUTPUT_DIR", unset = NA_character_),
@@ -154,6 +157,7 @@ report_lines <- c(
   sprintf("- winner_negloglik: `%s`", summary_dt$winner_negloglik[[1]]),
   "",
   "## Script Status",
+  sprintf("- validation: `%s`", script_summary[script_name == "validate_repo"]$status[[1]]),
   sprintf("- ranger: `%s`", script_summary[script_name == "mlr3_ranger_tuning"]$status[[1]]),
   sprintf("- xgboost: `%s`", script_summary[script_name == "mlr3_xgb_tuning"]$status[[1]]),
   sprintf("- zinb: `%s`", script_summary[script_name == "zinb_stepwise_cv"]$status[[1]]),

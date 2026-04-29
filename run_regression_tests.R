@@ -110,7 +110,26 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 2. Failed ranger run should still write log and manifest
+# 2. run_all.sh should validate before running model scripts
+run_all_lines <- readLines(file.path(REPO_DIR, "run_all.sh"), warn = FALSE)
+validation_step <- grep("Running repository validation", run_all_lines, fixed = TRUE)
+ranger_step <- grep("Running ranger tuning", run_all_lines, fixed = TRUE)
+run_all_preflight_ok <- length(validation_step) == 1L &&
+  length(ranger_step) == 1L &&
+  validation_step < ranger_step &&
+  any(grepl("^export VALIDATION_OUTPUT_DIR$", run_all_lines))
+
+tests[[length(tests) + 1L]] <- record_test(
+  "run_all_runs_validation_before_models",
+  run_all_preflight_ok,
+  if (run_all_preflight_ok) {
+    "run_all.sh runs validate_repo.R before model scripts and exports validation output"
+  } else {
+    "run_all.sh does not appear to run validation before model scripts"
+  }
+)
+
+# 3. Failed ranger run should still write log and manifest
 ranger_fail_out <- file.path(TEST_OUTPUT_DIR, "ranger_failed_run")
 unlink(ranger_fail_out, recursive = TRUE, force = TRUE)
 ranger_fail_run <- run_script(
@@ -135,7 +154,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 3. Repeated outer CV should add repeat metadata without changing overall metrics
+# 4. Repeated outer CV should add repeat metadata without changing overall metrics
 ranger_repeat_out <- file.path(TEST_OUTPUT_DIR, "ranger_repeated_run")
 unlink(ranger_repeat_out, recursive = TRUE, force = TRUE)
 ranger_repeat_run <- run_script(
@@ -174,7 +193,97 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 4. mlr3_xgb_tuning.R should run with factor features using fold-local encoding
+# 5. validate_repo.R should warn when missing-value row drops exceed the threshold
+missing_warn_fixture_dir <- file.path(TEST_OUTPUT_DIR, "missing_warn_fixture")
+unlink(missing_warn_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(missing_warn_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+missing_warn_input <- file.path(missing_warn_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = c(1, 2, 3, 4),
+    feature_a = c(10, NA, NA, 40)
+  ),
+  missing_warn_input
+)
+
+missing_warn_out <- file.path(missing_warn_fixture_dir, "outputs")
+missing_warn_run <- run_script(
+  "validate_repo.R",
+  args = c(
+    sprintf("--data=%s", missing_warn_input),
+    sprintf("--output-dir=%s", missing_warn_out),
+    "--target=target",
+    "--features=feature_a",
+    "--missing-drop-warn-fraction=0.25"
+  )
+)
+missing_warn_log_path <- file.path(missing_warn_out, "validate_repo.log")
+missing_warn_log <- if (file.exists(missing_warn_log_path)) {
+  paste(readLines(missing_warn_log_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+missing_warn_ok <- missing_warn_run$status == 0 &&
+  grepl("Warning: Dropped 2 of 4 row\\(s\\) with missing values in modeling data", missing_warn_log)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "validate_repo_warns_on_high_missing_row_drop",
+  missing_warn_ok,
+  if (missing_warn_ok) {
+    "validate_repo.R warns when modeling na.omit drops exceed the configured threshold"
+  } else {
+    paste("validate_repo.R did not emit the expected missing-drop warning:", missing_warn_run$output)
+  }
+)
+
+# 6. validate_repo.R should warn when ID columns have repeated values
+duplicate_id_fixture_dir <- file.path(TEST_OUTPUT_DIR, "duplicate_id_fixture")
+unlink(duplicate_id_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(duplicate_id_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+duplicate_id_input <- file.path(duplicate_id_fixture_dir, "input.csv")
+safe_write_csv(
+  data.table(
+    target = c(1, 2, 3, 4),
+    feature_a = c(10, 20, 30, 40),
+    customer_id = c("a", "a", "b", "c")
+  ),
+  duplicate_id_input
+)
+
+duplicate_id_out <- file.path(duplicate_id_fixture_dir, "outputs")
+duplicate_id_run <- run_script(
+  "validate_repo.R",
+  args = c(
+    sprintf("--data=%s", duplicate_id_input),
+    sprintf("--output-dir=%s", duplicate_id_out),
+    "--target=target",
+    "--features=feature_a",
+    "--id-cols=customer_id"
+  )
+)
+duplicate_id_log_path <- file.path(duplicate_id_out, "validate_repo.log")
+duplicate_id_log <- if (file.exists(duplicate_id_log_path)) {
+  paste(readLines(duplicate_id_log_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+duplicate_id_ok <- duplicate_id_run$status == 0 &&
+  grepl("Warning: ID column\\(s\\) have repeated value combinations", duplicate_id_log) &&
+  grepl("Standard row-wise CV may leak grouped entities", duplicate_id_log)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "validate_repo_warns_on_duplicate_id_values",
+  duplicate_id_ok,
+  if (duplicate_id_ok) {
+    "validate_repo.R warns when ID columns suggest possible grouped-CV leakage"
+  } else {
+    paste("validate_repo.R did not emit the expected duplicate-ID warning:", duplicate_id_run$output)
+  }
+)
+
+# 7. mlr3_xgb_tuning.R should run with factor features using fold-local encoding
 xgb_factor_fixture_dir <- file.path(TEST_OUTPUT_DIR, "xgb_factor_fixture")
 unlink(xgb_factor_fixture_dir, recursive = TRUE, force = TRUE)
 dir.create(xgb_factor_fixture_dir, recursive = TRUE, showWarnings = FALSE)
@@ -227,7 +336,7 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
-# 5. compare_best_models.R should report availability for missing/failed outputs
+# 8. compare_best_models.R should report availability for missing/failed outputs
 compare_fixture_root <- file.path(TEST_OUTPUT_DIR, "compare_fixture")
 unlink(compare_fixture_root, recursive = TRUE, force = TRUE)
 dir.create(file.path(compare_fixture_root, "outputs_ranger"), recursive = TRUE, showWarnings = FALSE)

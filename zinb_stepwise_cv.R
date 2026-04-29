@@ -62,6 +62,11 @@ N_FOLDS <- get_int_setting("folds", "N_FOLDS", config_value(CONFIG, c("experimen
 INNER_FOLDS <- get_int_setting("inner-folds", "INNER_FOLDS", config_value(CONFIG, c("experiment", "inner_folds")), min_value = 2)
 SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
 STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", config_value(CONFIG, c("experiment", "strata_bins")), min_value = 2)
+MISSING_DROP_WARN_FRACTION <- get_optional_numeric_setting(
+  "missing-drop-warn-fraction", "MISSING_DROP_WARN_FRACTION",
+  config_value_or(CONFIG, c("experiment", "missing_drop_warn_fraction"), 0.05),
+  min_value = 0
+)
 MAX_VARS <- get_numeric_setting("max-vars", "ZINB_MAX_VARS", config_value(CONFIG, c("zinb", "max_vars")), min_value = 1)
 MIN_IMPROVEMENT <- get_numeric_setting("min-improvement", "ZINB_MIN_IMPROVEMENT", config_value(CONFIG, c("zinb", "min_improvement")), min_value = 0)
 METRIC_TO_OPTIMIZE <- get_setting("metric", "METRIC_TO_OPTIMIZE", config_value(CONFIG, c("zinb", "metric")))
@@ -909,7 +914,8 @@ with_run_finalizer({
     df, TARGET, FEATURE_COLS, ID_COLS,
     require_count_target = TRUE,
     row_filter = ROW_FILTER,
-    extra_feature_cols = zero_formula_cols
+    extra_feature_cols = zero_formula_cols,
+    missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
   )
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
   resolved_config <- list(
@@ -925,6 +931,7 @@ with_run_finalizer({
     n_folds = N_FOLDS,
     inner_folds = INNER_FOLDS,
     strata_bins = STRATA_BINS,
+    missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION,
     metric = METRIC_TO_OPTIMIZE,
     verbosity = ZINB_VERBOSITY,
     parallel_backend = PARALLEL_BACKEND,
@@ -952,6 +959,7 @@ with_run_finalizer({
     extra = list(
       "Folds" = N_FOLDS,
       "Inner folds" = INNER_FOLDS,
+      "Missing-drop warn fraction" = if (is.na(MISSING_DROP_WARN_FRACTION)) "<disabled>" else MISSING_DROP_WARN_FRACTION,
       "Workers" = N_WORKERS,
       "Verbosity" = ZINB_VERBOSITY,
       "Parallel backend" = PARALLEL_BACKEND,

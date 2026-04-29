@@ -90,6 +90,7 @@ RANGER_OUTPUT_DIR="${RANGER_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_ranger}"
 XGB_OUTPUT_DIR="${XGB_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_xgb}"
 ZINB_OUTPUT_DIR="${ZINB_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_zinb}"
 COMPARISON_OUTPUT_DIR="${COMPARISON_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_model_comparison}"
+VALIDATION_OUTPUT_DIR="${VALIDATION_OUTPUT_DIR:-$RUN_OUTPUT_ROOT/outputs_validation}"
 RUN_SUMMARY_OUTPUT_DIR="${RUN_SUMMARY_OUTPUT_DIR:-$RUN_OUTPUT_ROOT}"
 
 run_step() {
@@ -108,6 +109,7 @@ export RANGER_OUTPUT_DIR
 export XGB_OUTPUT_DIR
 export ZINB_OUTPUT_DIR
 export COMPARISON_OUTPUT_DIR
+export VALIDATION_OUTPUT_DIR
 export MLR3_DATA_PATH
 export RUN_OUTPUT_ROOT
 export RUN_SUMMARY_OUTPUT_DIR
@@ -129,8 +131,10 @@ echo "Ranger output: $RANGER_OUTPUT_DIR"
 echo "XGBoost output: $XGB_OUTPUT_DIR"
 echo "ZINB output: $ZINB_OUTPUT_DIR"
 echo "Comparison output: $COMPARISON_OUTPUT_DIR"
+echo "Validation output: $VALIDATION_OUTPUT_DIR"
 echo "Run summary output: $RUN_SUMMARY_OUTPUT_DIR"
 
+run_step "Running repository validation" Rscript "$SCRIPT_DIR/validate_repo.R"
 run_step "Running ranger tuning" Rscript "$SCRIPT_DIR/mlr3_ranger_tuning.R"
 run_step "Running xgboost tuning" Rscript "$SCRIPT_DIR/mlr3_xgb_tuning.R"
 run_step "Running ZINB stepwise CV" Rscript "$SCRIPT_DIR/zinb_stepwise_cv.R"

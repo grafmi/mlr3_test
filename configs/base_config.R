@@ -28,6 +28,10 @@ CONFIG <- list(
     # validation loop unchanged.
     inner_folds = 5L,
     strata_bins = 10L,
+    # Warn if modeling drops more than this fraction of rows via na.omit().
+    # This is a guardrail for real data where missingness can silently shift
+    # the modeled population. Set to NA to disable the warning.
+    missing_drop_warn_fraction = 0.05,
     # Worker processes for mlr3 tuning and resampling. A practical default on
     # a workstation is often physical CPU cores minus one.
     n_workers = 1L

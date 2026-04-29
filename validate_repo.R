@@ -44,6 +44,11 @@ DATA_PATH <- get_path_setting("data", "MLR3_DATA_PATH", config_value(CONFIG, c("
 OUTPUT_DIR <- get_path_setting("output-dir", "VALIDATION_OUTPUT_DIR", config_value(CONFIG, c("validation", "output_dir")), base_dir = REPO_DIR)
 N_FOLDS <- get_int_setting("folds", "N_FOLDS", config_value(CONFIG, c("experiment", "n_folds")), min_value = 2)
 INNER_FOLDS <- get_int_setting("inner-folds", "INNER_FOLDS", config_value(CONFIG, c("experiment", "inner_folds")), min_value = 2)
+MISSING_DROP_WARN_FRACTION <- get_optional_numeric_setting(
+  "missing-drop-warn-fraction", "MISSING_DROP_WARN_FRACTION",
+  config_value_or(CONFIG, c("experiment", "missing_drop_warn_fraction"), 0.05),
+  min_value = 0
+)
 
 required_packages <- c(
   "data.table", "mlr3", "mlr3learners", "mlr3tuning", "paradox",
@@ -116,7 +121,8 @@ with_run_finalizer({
       df, TARGET, FEATURE_COLS, ID_COLS,
       require_count_target = FALSE,
       row_filter = ROW_FILTER,
-      extra_feature_cols = zero_formula_cols
+      extra_feature_cols = zero_formula_cols,
+      missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
     )
 
     checks_local <- list(
