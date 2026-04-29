@@ -138,8 +138,10 @@ The file is grouped so that the most important settings appear first:
 - `CONFIG$experiment$missing_drop_warn_fraction`: warn when modeling drops more
   than this fraction of rows with missing values; set to `NA` to disable
 - `CONFIG$preprocess`: preprocessing defaults and factor handling
-- `CONFIG$ranger`: ranger output directory and tuning defaults
-- `CONFIG$xgboost`: xgboost output directory and tuning defaults
+- `CONFIG$ranger`: ranger output directory, tuning defaults, and random-search
+  batch size
+- `CONFIG$xgboost`: xgboost output directory, tuning defaults, and random-search
+  batch size
 - `CONFIG$zinb`: optional ZINB-only feature set, output directory, metric,
   transformations, workers, parallel backend, numeric-as-factor controls, and
   zero-inflation formula
@@ -334,9 +336,9 @@ Rscript preprocess_data.R --keep-cols=n_eintritte,prcrank --drop-missing-rows=tr
 Rscript preprocess_data.R --sample-rows=500 --sample-seed=123
 Rscript preprocess_data.R --chars-to-factors=true --factor-min-count=5
 Rscript mlr3_ranger_tuning.R --row-filter="split == 'train'" --features=prcrank,potenzielle_kunden
-Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5 --tune-evals=20 --workers=4
+Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5 --tune-evals=20 --tune-batch-size=4 --workers=16
 Rscript mlr3_ranger_tuning.R --outer-repeats=3 --folds=5 --inner-folds=3
-Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
+Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom --tune-batch-size=4
 Rscript zinb_stepwise_cv.R --metric=poisson_deviance --max-vars=3 --workers=4
 Rscript zinb_stepwise_cv.R --features=prcrank,potenzielle_kunden
 Rscript zinb_stepwise_cv.R --verbosity=detailed
@@ -352,6 +354,7 @@ The same settings can be controlled with environment variables, for example
 `PREPROCESS_SAMPLE_ROWS`, `PREPROCESS_SAMPLE_SEED`,
 `PREPROCESS_CHARS_TO_FACTORS`, `PREPROCESS_FACTOR_MIN_COUNT`,
 `MLR3_DATA_PATH`, `ROW_FILTER`, `N_FOLDS`, `INNER_FOLDS`, `OUTER_REPEATS`, `TUNE_EVALS`, `N_WORKERS`,
+`TUNE_BATCH_SIZE`, `RANGER_TUNE_BATCH_SIZE`, `XGB_TUNE_BATCH_SIZE`,
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
 `COMPARISON_OUTPUT_DIR`. The full-run wrapper also supports `RUN_ZINB=false`
 to skip the ZINB step while keeping validation, ranger, XGBoost, comparison,
@@ -371,6 +374,13 @@ For ZINB parallelization, you can choose:
 
 For reproducibility, the default worker count is `1`. Increase `--workers` for
 faster mlr3 runs and for parallel ZINB candidate evaluation on Linux.
+For `ranger` and `xgboost`, `CONFIG$ranger$tune_batch_size` and
+`CONFIG$xgboost$tune_batch_size` control how many random-search parameter
+configurations are evaluated per tuner batch. With `inner_folds = 5` and
+`tune_batch_size = 4`, up to roughly `20` inner-CV jobs can be available to
+the future worker pool. Ranger still uses `num.threads = 1`, and XGBoost still
+uses `nthread = 1`, so this increases process-level parallelism rather than
+model-internal threads.
 Using a smaller `inner_folds` than `n_folds` is often a good compromise when
 you want faster tuning runs without changing the outer validation design.
 If you want a more stable validation estimate for `ranger` or `xgboost`,
@@ -393,6 +403,8 @@ count. A good starting point on an 8-core machine is often:
 ```r
 CONFIG$experiment$n_workers <- 7L
 CONFIG$zinb$workers <- 7L
+CONFIG$ranger$tune_batch_size <- 2L
+CONFIG$xgboost$tune_batch_size <- 2L
 ```
 
 On laptops or when running several jobs at once, values such as `4L` or `6L`

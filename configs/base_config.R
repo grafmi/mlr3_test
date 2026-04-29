@@ -87,6 +87,10 @@ CONFIG <- list(
   ranger = list(
     output_dir = "outputs_ranger",
     tune_evals = 10L,
+    # Number of random-search configurations evaluated per tuning batch.
+    # Higher values can better utilize many workers: roughly
+    # tune_batch_size * inner_folds jobs can be active during tuning.
+    tune_batch_size = 1L,
     # Search-space entries can be removed or commented out. If a supported
     # optional entry is missing here, it is simply not tuned.
     search_space = list(
@@ -113,6 +117,10 @@ CONFIG <- list(
   xgboost = list(
     output_dir = "outputs_xgb",
     tune_evals = 10L,
+    # Number of random-search configurations evaluated per tuning batch.
+    # Higher values can better utilize many workers while keeping xgboost
+    # model-level threads at 1.
+    tune_batch_size = 1L,
     # Search-space entries can be removed or commented out. If a supported
     # optional entry is missing here, it is simply not tuned.
     search_space = list(
