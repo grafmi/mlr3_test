@@ -35,6 +35,10 @@ usable_cores <- max(1L, ifelse(is.na(cores), 2L, cores - 1L))
 workers <- max(1L, ceiling(usable_cores / learner_threads))
 measures <- msrs(c("regr.rmse", "regr.mae", "regr.rsq"))
 
+elapsed <- function(started_at) {
+  paste0(round(as.numeric(difftime(Sys.time(), started_at, units = "mins")), 2), " min")
+}
+
 future::plan(future::multisession, workers = workers) # RStudio-freundlich; Learner-Threads bleiben unten bei 1.
 on.exit(future::plan(future::sequential), add = TRUE)
 message("Nested CV setup: outer=", outer_folds, ", inner=", inner_folds, ", tune_evals=", tune_evals, ", workers=", workers)
@@ -161,12 +165,26 @@ select_zinb_terms <- function(work_dt, pool, folds, seed, zero = zinb_zero) {
   # Greedy Forward Selection: fuege den Term hinzu, der den inner-CV-RMSE am staerksten senkt.
   while (length(selected_vars) < min(zinb_max_features, length(pool))) {
     remaining <- candidates[!var %in% selected_vars]
-    scores <- sapply(seq_len(nrow(remaining)), function(i) {
-      score_zinb_terms(work_dt, c(selected_terms, remaining$term[[i]]), folds, seed, zero = zero)
-    })
+    step <- length(selected_vars) + 1L
+    step_started_at <- Sys.time()
+    message("    ZINB selection step ", step, ": ", length(unique(remaining$var)), " variable(s), ", nrow(remaining), " candidate term(s)")
+    scores <- numeric(nrow(remaining))
+    for (i in seq_len(nrow(remaining))) {
+      if (i == 1L || i == nrow(remaining) || i %% 10L == 0L) {
+        message("      candidate ", i, "/", nrow(remaining), ": ", remaining$var[[i]], " [", remaining$transform[[i]], "]")
+      }
+      scores[[i]] <- score_zinb_terms(work_dt, c(selected_terms, remaining$term[[i]]), folds, seed, zero = zero)
+    }
     if (!length(scores) || all(!is.finite(scores))) break
     pick <- which.min(scores)
-    if (best - scores[[pick]] <= zinb_min_improvement) break
+    message(
+      "    best step ", step, ": ", remaining$var[[pick]], " [", remaining$transform[[pick]], "] rmse=",
+      signif(scores[[pick]], 6), " (previous=", signif(best, 6), ", elapsed=", elapsed(step_started_at), ")"
+    )
+    if (best - scores[[pick]] <= zinb_min_improvement) {
+      message("    stopping ZINB selection: improvement <= zinb_min_improvement")
+      break
+    }
     selected_terms <- c(selected_terms, remaining$term[[pick]])
     selected_vars <- c(selected_vars, remaining$var[[pick]])
     best <- scores[[pick]]
@@ -180,9 +198,11 @@ run_zinb_nested_cv <- function() {
   rows <- vector("list", outer_folds)
   selected_rows <- vector("list", outer_folds)
   for (fold in seq_len(outer_folds)) {
+    fold_started_at <- Sys.time()
     message("  ZINB outer fold ", fold, "/", outer_folds)
     train_dt <- dt[outer_fold_id != fold]
     test_dt <- dt[outer_fold_id == fold]
+    message("    train rows=", nrow(train_dt), ", test rows=", nrow(test_dt), ", candidate terms=", nrow(make_zinb_candidates(train_dt, features)))
     selected <- select_zinb_terms(train_dt, features, inner_folds, seed + fold, zero = zinb_zero)
     fit <- fit_predict_zinb(train_dt, test_dt, selected$terms, zero = zinb_zero)
     if (is.null(fit)) stop("ZINB outer fold ", fold, " failed.", call. = FALSE)
@@ -192,6 +212,7 @@ run_zinb_nested_cv <- function() {
       selected_features = paste(selected$vars, collapse = ", "),
       selected_terms = paste(selected$terms, collapse = " + ")
     )
+    message("  Finished ZINB outer fold ", fold, "/", outer_folds, " in ", elapsed(fold_started_at))
   }
   pred <- rbindlist(rows)
   score <- data.table(
@@ -203,6 +224,9 @@ run_zinb_nested_cv <- function() {
 }
 
 if (run_zinb) check_zinb_package()
+if (run_zinb) {
+  message("ZINB candidate terms: ", nrow(make_zinb_candidates(dt, features)), " across ", length(features), " feature(s)")
+}
 
 spaces <- list(
   ranger = ps(
@@ -230,10 +254,11 @@ spaces <- list(
 # ---- nested CV ---------------------------------------------------------------
 model_names <- c(names(tasks), if (run_zinb) "zinb")
 results <- lapply(model_names, function(model) {
+  model_started_at <- Sys.time()
   message("Starting ", model, " nested CV...")
   if (model == "zinb") {
     out <- run_zinb_nested_cv()
-    message("Finished ", model, ".")
+    message("Finished ", model, " in ", elapsed(model_started_at), ".")
     return(out)
   }
 
@@ -256,7 +281,7 @@ results <- lapply(model_names, function(model) {
   outer_cv <- make_stratified_outer_cv(tasks[[model]], strata = dt$.stratum, folds = outer_folds, seed = seed)
   rr <- resample(tasks[[model]], learner, outer_cv, store_models = TRUE)
   pred <- rr$prediction()
-  message("Finished ", model, ".")
+  message("Finished ", model, " in ", elapsed(model_started_at), ".")
   list(
     score = as.data.table(as.list(rr$aggregate(measures))),
     predictions = data.table(row_id = pred$row_ids, truth = pred$truth, response = pred$response),
