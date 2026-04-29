@@ -151,6 +151,11 @@ CONFIG <- list(
     # written.
     output_dir = "outputs_zinb",
 
+    # Optional reduced predictor set for ZINB only. Leave empty to reuse
+    # CONFIG$experiment$feature_cols. This is useful when the full ranger/XGB
+    # feature set makes ZINB stepwise selection too slow on real data.
+    feature_cols = character(0),
+
     # Metric used to decide which candidate is best during forward selection.
     # Supported values include rmse, mae, max_error, mse, r2,
     # poisson_deviance, and negloglik. Keep rmse as the default if you want

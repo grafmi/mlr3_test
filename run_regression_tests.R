@@ -1001,6 +1001,60 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
+# zinb_stepwise_cv.R should allow a reduced config-only ZINB feature set
+zinb_feature_config_fixture_dir <- file.path(TEST_OUTPUT_DIR, "zinb_feature_config_fixture")
+unlink(zinb_feature_config_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(zinb_feature_config_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+zinb_feature_config_path <- file.path(zinb_feature_config_fixture_dir, "zinb_feature_config.R")
+writeLines(
+  c(
+    sprintf("sys.source(\"%s\", envir = environment())", gsub("\\\\", "/", REGRESSION_CONFIG_PATH)),
+    "CONFIG$experiment$feature_cols <- c(\"prcrank\", \"potenzielle_kunden\", \"unfalldeckung\")",
+    "CONFIG$zinb$feature_cols <- c(\"prcrank\")",
+    "CONFIG$zinb$transformations_numeric <- c(\"raw\")",
+    "CONFIG$zinb$transformations_factor <- c(\"raw\")",
+    "CONFIG$zinb$parallel_backend <- \"sequential\"",
+    "CONFIG$zinb$workers <- 1L",
+    "CONFIG$zinb$verbosity <- \"quiet\""
+  ),
+  zinb_feature_config_path
+)
+
+zinb_feature_config_out <- file.path(zinb_feature_config_fixture_dir, "outputs")
+zinb_feature_config_run <- run_script(
+  "zinb_stepwise_cv.R",
+  args = c(
+    sprintf("--output-dir=%s", zinb_feature_config_out),
+    "--folds=2",
+    "--inner-folds=2",
+    "--max-vars=1",
+    "--metric=rmse",
+    "--zero-formula=1"
+  ),
+  env = c(sprintf("CONFIG_PATH=%s", zinb_feature_config_path))
+)
+zinb_feature_overview <- read_csv_if_exists(file.path(zinb_feature_config_out, "zinb_dataset_overview.csv"))
+zinb_feature_config_path_out <- file.path(zinb_feature_config_out, "resolved_config.rds")
+zinb_feature_config <- if (file.exists(zinb_feature_config_path_out)) readRDS(zinb_feature_config_path_out) else NULL
+zinb_feature_config_ok <- zinb_feature_config_run$status == 0 &&
+  !is.null(zinb_feature_overview) &&
+  !is.null(zinb_feature_config) &&
+  identical(as.integer(zinb_feature_overview$n_features[[1]]), 1L) &&
+  identical(as.character(zinb_feature_overview$feature_list[[1]]), "prcrank") &&
+  identical(as.character(zinb_feature_config$feature_cols), "prcrank") &&
+  setequal(as.character(zinb_feature_config$experiment_feature_cols), c("prcrank", "potenzielle_kunden", "unfalldeckung"))
+
+tests[[length(tests) + 1L]] <- record_test(
+  "zinb_uses_config_specific_feature_subset",
+  zinb_feature_config_ok,
+  if (zinb_feature_config_ok) {
+    "zinb_stepwise_cv.R uses CONFIG$zinb$feature_cols without changing global experiment features"
+  } else {
+    paste("zinb_stepwise_cv.R did not honor CONFIG$zinb$feature_cols:", zinb_feature_config_run$output)
+  }
+)
+
 # zinb_stepwise_cv.R should consider factor() candidates for low-cardinality numeric features
 zinb_factor_fixture_dir <- file.path(TEST_OUTPUT_DIR, "zinb_factor_fixture")
 unlink(zinb_factor_fixture_dir, recursive = TRUE, force = TRUE)

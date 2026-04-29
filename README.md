@@ -140,8 +140,9 @@ The file is grouped so that the most important settings appear first:
 - `CONFIG$preprocess`: preprocessing defaults and factor handling
 - `CONFIG$ranger`: ranger output directory and tuning defaults
 - `CONFIG$xgboost`: xgboost output directory and tuning defaults
-- `CONFIG$zinb`: ZINB output directory, metric, transformations, workers,
-  parallel backend, numeric-as-factor controls, and zero-inflation formula
+- `CONFIG$zinb`: optional ZINB-only feature set, output directory, metric,
+  transformations, workers, parallel backend, numeric-as-factor controls, and
+  zero-inflation formula
 - `CONFIG$comparison`: model-comparison defaults
 
 The scripts use this precedence order:
@@ -191,6 +192,19 @@ zero_inflation_formula = "1"
 zero_inflation_formula = "same_as_count"
 zero_inflation_formula = "prcrank + log1p(potenzielle_kunden)"
 ```
+
+For faster ZINB runs on real data, `CONFIG$zinb$feature_cols` can define a
+reduced ZINB-only predictor set while ranger and XGBoost continue to use
+`CONFIG$experiment$feature_cols`:
+
+```r
+CONFIG$experiment$feature_cols <- c("prcrank", "potenzielle_kunden", "unfalldeckung", "region")
+CONFIG$zinb$feature_cols <- c("prcrank", "potenzielle_kunden")
+```
+
+Leave `CONFIG$zinb$feature_cols` empty to reuse the global experiment feature
+set. Command-line `--features` and environment variable `FEATURE_COLS` still
+override the ZINB feature set for direct `zinb_stepwise_cv.R` runs.
 
 Before the ZINB cross-validation starts, the script now validates the
 zero-inflation formula and all configured feature transformations against the
@@ -324,6 +338,7 @@ Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5
 Rscript mlr3_ranger_tuning.R --outer-repeats=3 --folds=5 --inner-folds=3
 Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom
 Rscript zinb_stepwise_cv.R --metric=poisson_deviance --max-vars=3 --workers=4
+Rscript zinb_stepwise_cv.R --features=prcrank,potenzielle_kunden
 Rscript zinb_stepwise_cv.R --verbosity=detailed
 Rscript zinb_stepwise_cv.R --numeric-as-factor-max-levels=8
 Rscript zinb_stepwise_cv.R --numeric-as-factor-vars=age_band_num,tariff_class_num
@@ -343,7 +358,7 @@ to skip the ZINB step while keeping validation, ranger, XGBoost, comparison,
 and run-summary outputs. ZINB also supports `ZINB_WORKERS`, which takes
 precedence over `N_WORKERS` for that script. Additional ZINB-specific overrides
 include `ZINB_ZERO_FORMULA`, `ZINB_NUMERIC_AS_FACTOR_MAX_LEVELS`,
-`ZINB_NUMERIC_AS_FACTOR_VARS`, `ZINB_PARALLEL_BACKEND`, and
+`ZINB_NUMERIC_AS_FACTOR_VARS`, `FEATURE_COLS`, `ZINB_PARALLEL_BACKEND`, and
 `ZINB_VERBOSITY`.
 
 For ZINB parallelization, you can choose:

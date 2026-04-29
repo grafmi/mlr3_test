@@ -31,10 +31,18 @@ SCRIPT_PACKAGES <- c("data.table")
 suppressPackageStartupMessages(library(data.table))
 
 TARGET <- get_setting("target", "TARGET", config_value(CONFIG, c("experiment", "target")))
+FEATURES_OVERRIDE <- !is.null(get_arg_value("features")) ||
+  nzchar(Sys.getenv("FEATURE_COLS", unset = ""))
 FEATURE_COLS <- parse_csv_setting(get_setting(
   "features", "FEATURE_COLS",
   paste(config_value(CONFIG, c("experiment", "feature_cols")), collapse = ",")
 ))
+CONFIG_ZINB_FEATURE_COLS <- config_value_or(CONFIG, c("zinb", "feature_cols"), character(0))
+ZINB_FEATURE_COLS <- if (FEATURES_OVERRIDE || length(CONFIG_ZINB_FEATURE_COLS) == 0) {
+  FEATURE_COLS
+} else {
+  CONFIG_ZINB_FEATURE_COLS
+}
 ID_COLS <- parse_csv_setting(get_setting(
   "id-cols", "ID_COLS",
   paste(config_value(CONFIG, c("experiment", "id_cols")), collapse = ",")
@@ -118,6 +126,7 @@ write_validation_report <- function(output_dir, checks_dt, resolved_config, dict
     sprintf("- output_dir: `%s`", resolved_config$output_dir),
     sprintf("- target: `%s`", resolved_config$target),
     sprintf("- feature_cols: `%s`", paste(resolved_config$feature_cols, collapse = ", ")),
+    sprintf("- zinb_feature_cols: `%s`", paste(resolved_config$zinb_feature_cols, collapse = ", ")),
     sprintf("- id_cols: `%s`", if (length(resolved_config$id_cols) > 0) paste(resolved_config$id_cols, collapse = ", ") else "<none>"),
     sprintf("- row_filter: `%s`", if (nzchar(trimws(resolved_config$row_filter))) resolved_config$row_filter else "<none>"),
     sprintf("- outer_folds: `%s`", resolved_config$n_folds),
@@ -204,6 +213,7 @@ with_run_finalizer({
     output_dir = normalizePath(OUTPUT_DIR, mustWork = FALSE),
     target = TARGET,
     feature_cols = FEATURE_COLS,
+    zinb_feature_cols = ZINB_FEATURE_COLS,
     id_cols = ID_COLS,
     row_filter = ROW_FILTER,
     n_folds = N_FOLDS,
@@ -248,28 +258,33 @@ with_run_finalizer({
     zero_formula_cols <- if (identical(zero_formula, "same_as_count")) character(0) else {
       formula_referenced_columns(zero_formula, label = "ZINB zero-formula")
     }
+    zinb_extra_feature_cols <- setdiff(ZINB_FEATURE_COLS, FEATURE_COLS)
     dictionary_dt <- data.table::as.data.table(data.table::copy(df))
     dictionary_filter <- apply_row_filter_checked(dictionary_dt, ROW_FILTER, label = "Validation data-dictionary row filter")
     dictionary_dt <- dictionary_filter$data
-    dictionary_cols <- intersect(unique(c(TARGET, FEATURE_COLS, ID_COLS, zero_formula_cols)), names(dictionary_dt))
+    dictionary_cols <- intersect(unique(c(TARGET, FEATURE_COLS, ZINB_FEATURE_COLS, ID_COLS, zero_formula_cols)), names(dictionary_dt))
     dictionary_dt <- dictionary_dt[, ..dictionary_cols]
-    validation_dictionary <<- data_dictionary(dictionary_dt, target = TARGET, feature_cols = FEATURE_COLS, id_cols = ID_COLS)
+    validation_dictionary <<- data_dictionary(dictionary_dt, target = TARGET, feature_cols = unique(c(FEATURE_COLS, ZINB_FEATURE_COLS)), id_cols = ID_COLS)
     safe_write_csv(validation_dictionary, file.path(OUTPUT_DIR, "validation_data_dictionary.csv"))
 
     work_dt <- prepare_modeling_data(
       df, TARGET, FEATURE_COLS, ID_COLS,
       require_count_target = FALSE,
       row_filter = ROW_FILTER,
-      extra_feature_cols = zero_formula_cols,
+      extra_feature_cols = unique(c(zero_formula_cols, zinb_extra_feature_cols)),
       missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
     )
 
     checks_local <- list(
       record_check("modeling_data_loads", TRUE, sprintf("%s row(s), %s column(s)", nrow(work_dt), ncol(work_dt))),
-      record_check("target_and_features_present", TRUE, paste(c(TARGET, FEATURE_COLS), collapse = ", "))
+      record_check("target_and_features_present", TRUE, paste(c(TARGET, FEATURE_COLS), collapse = ", ")),
+      record_check("zinb_feature_cols_present", TRUE, paste(ZINB_FEATURE_COLS, collapse = ", "))
     )
     warn_if_small_cv_folds(nrow(work_dt), N_FOLDS, context = "modeling data")
     warn_if_low_information_features(work_dt, FEATURE_COLS, context = "modeling data")
+    if (!identical(ZINB_FEATURE_COLS, FEATURE_COLS)) {
+      warn_if_low_information_features(work_dt, ZINB_FEATURE_COLS, context = "ZINB modeling data")
+    }
     warn_if_target_extremes(work_dt, TARGET)
 
     if (!identical(zero_formula, "same_as_count")) {

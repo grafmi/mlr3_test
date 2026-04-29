@@ -42,9 +42,12 @@ MAIN_PROCESS_PID <- Sys.getpid()
 # User settings
 # =========================
 TARGET <- get_setting("target", "TARGET", config_value(CONFIG, c("experiment", "target")))
+EXPERIMENT_FEATURE_COLS <- config_value(CONFIG, c("experiment", "feature_cols"))
+CONFIG_ZINB_FEATURE_COLS <- config_value_or(CONFIG, c("zinb", "feature_cols"), character(0))
+DEFAULT_ZINB_FEATURE_COLS <- if (length(CONFIG_ZINB_FEATURE_COLS) > 0) CONFIG_ZINB_FEATURE_COLS else EXPERIMENT_FEATURE_COLS
 FEATURE_COLS <- parse_csv_setting(get_setting(
   "features", "FEATURE_COLS",
-  paste(config_value(CONFIG, c("experiment", "feature_cols")), collapse = ",")
+  paste(DEFAULT_ZINB_FEATURE_COLS, collapse = ",")
 ))
 ID_COLS <- parse_csv_setting(get_setting(
   "id-cols", "ID_COLS",
@@ -924,6 +927,7 @@ with_run_finalizer({
     data_path = normalizePath(DATA_PATH, mustWork = FALSE),
     output_dir = normalizePath(OUTPUT_DIR, mustWork = FALSE),
     target = TARGET,
+    experiment_feature_cols = EXPERIMENT_FEATURE_COLS,
     feature_cols = FEATURE_COLS,
     id_cols = ID_COLS,
     row_filter = ROW_FILTER,
@@ -950,6 +954,9 @@ with_run_finalizer({
   log_info("Using output directory: ", normalizePath(OUTPUT_DIR, mustWork = FALSE))
   if (!is.na(RUN_NAME)) log_info("Run name: ", RUN_NAME)
   if (nzchar(trimws(ROW_FILTER))) log_info("Using row filter: ", ROW_FILTER)
+  if (!identical(FEATURE_COLS, EXPERIMENT_FEATURE_COLS)) {
+    log_info("Using ZINB-specific feature columns: ", paste(FEATURE_COLS, collapse = ", "))
+  }
   log_dataset_overview(
     work_dt,
     target = TARGET,
@@ -1161,6 +1168,7 @@ with_run_finalizer({
     sprintf("- data_path: `%s`", normalizePath(DATA_PATH, mustWork = FALSE)),
     sprintf("- output_dir: `%s`", normalizePath(OUTPUT_DIR, mustWork = FALSE)),
     sprintf("- target: `%s`", TARGET),
+    sprintf("- experiment_feature_cols: `%s`", paste(EXPERIMENT_FEATURE_COLS, collapse = ", ")),
     sprintf("- feature_cols: `%s`", paste(FEATURE_COLS, collapse = ", ")),
     sprintf("- zero_inflation_formula: `%s`", ZERO_INFLATION_FORMULA),
     sprintf("- seed: `%s`", SEED),
