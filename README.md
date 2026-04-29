@@ -239,6 +239,18 @@ At the end of a successful full run it also writes a small run-level summary in
 the run root directory, including a run report, config snapshot, and registry
 entry under the results root.
 
+ZINB can be skipped for faster real-data runs while still using the same
+wrapper:
+
+```sh
+RUN_ZINB=false ./run_all.sh
+```
+
+In that mode, `run_all.sh` fits ranger and XGBoost, writes a skipped ZINB
+manifest under `outputs_zinb_skipped`, and still runs the model comparison and
+run summary. The comparison marks ZINB as skipped and excludes it from ranking,
+so stale ZINB results from an earlier run are not reused accidentally.
+
 For real data, two additional guardrails are logged during validation and
 modeling:
 
@@ -281,6 +293,7 @@ VERSION_RUNS=false ./run_all.sh
 RUN_ID=baseline_a ./run_all.sh
 RESULTS_ROOT_DIR=/tmp/my_results ./run_all.sh
 CONFIG_PATH=configs/my_variant.R ./run_all.sh
+RUN_ZINB=false ./run_all.sh
 ```
 
 You can also run a lightweight preflight check before a longer experiment:
@@ -325,7 +338,9 @@ The same settings can be controlled with environment variables, for example
 `PREPROCESS_CHARS_TO_FACTORS`, `PREPROCESS_FACTOR_MIN_COUNT`,
 `MLR3_DATA_PATH`, `ROW_FILTER`, `N_FOLDS`, `INNER_FOLDS`, `OUTER_REPEATS`, `TUNE_EVALS`, `N_WORKERS`,
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
-`COMPARISON_OUTPUT_DIR`. ZINB also supports `ZINB_WORKERS`, which takes
+`COMPARISON_OUTPUT_DIR`. The full-run wrapper also supports `RUN_ZINB=false`
+to skip the ZINB step while keeping validation, ranger, XGBoost, comparison,
+and run-summary outputs. ZINB also supports `ZINB_WORKERS`, which takes
 precedence over `N_WORKERS` for that script. Additional ZINB-specific overrides
 include `ZINB_ZERO_FORMULA`, `ZINB_NUMERIC_AS_FACTOR_MAX_LEVELS`,
 `ZINB_NUMERIC_AS_FACTOR_VARS`, `ZINB_PARALLEL_BACKEND`, and

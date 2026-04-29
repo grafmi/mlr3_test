@@ -1369,6 +1369,9 @@ manifest_status_summary <- function(output_dir, required_files = character(0)) {
       status <- "incomplete_outputs"
       reason <- "required files exist but run manifest is missing"
     }
+  } else if (identical(manifest_status, "skipped")) {
+    status <- "skipped"
+    reason <- "run intentionally skipped"
   } else if (!identical(manifest_status, "completed")) {
     status <- "failed_run"
     reason <- sprintf("run manifest status is '%s'", manifest_status)

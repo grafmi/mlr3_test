@@ -565,6 +565,76 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
+# compare_best_models.R should treat an intentionally skipped ZINB run as not rankable
+compare_skipped_fixture_root <- file.path(TEST_OUTPUT_DIR, "compare_skipped_fixture")
+unlink(compare_skipped_fixture_root, recursive = TRUE, force = TRUE)
+dir.create(file.path(compare_skipped_fixture_root, "outputs_ranger"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(compare_skipped_fixture_root, "outputs_xgb"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(compare_skipped_fixture_root, "outputs_zinb_skipped"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(compare_skipped_fixture_root, "outputs_model_comparison"), recursive = TRUE, showWarnings = FALSE)
+
+safe_write_csv(
+  data.table(script_name = "mlr3_ranger_tuning", status = "completed"),
+  file.path(compare_skipped_fixture_root, "outputs_ranger", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(
+    rmse = 1.2, mae = 0.8, max_error = 2.0, sae = 0.1, mse = 1.44,
+    bias = 0.05, r2 = 0.3, poisson_deviance = 0.9, negloglik = NA_real_
+  ),
+  file.path(compare_skipped_fixture_root, "outputs_ranger", "ranger_overall_metrics.csv")
+)
+safe_write_csv(
+  data.table("repeat" = 1L, num.trees = 500L, regr.rmse = 1.2),
+  file.path(compare_skipped_fixture_root, "outputs_ranger", "ranger_best_params.csv")
+)
+safe_write_csv(
+  data.table(script_name = "mlr3_xgb_tuning", status = "completed"),
+  file.path(compare_skipped_fixture_root, "outputs_xgb", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(
+    rmse = 1.0, mae = 0.7, max_error = 1.9, sae = 0.1, mse = 1.0,
+    bias = 0.02, r2 = 0.4, poisson_deviance = 0.8, negloglik = NA_real_
+  ),
+  file.path(compare_skipped_fixture_root, "outputs_xgb", "xgb_overall_metrics.csv")
+)
+safe_write_csv(
+  data.table(nrounds = 100L, regr.rmse = 1.0),
+  file.path(compare_skipped_fixture_root, "outputs_xgb", "xgb_best_params.csv")
+)
+safe_write_csv(
+  data.table(script_name = "zinb_stepwise_cv", status = "skipped"),
+  file.path(compare_skipped_fixture_root, "outputs_zinb_skipped", "run_manifest.csv")
+)
+
+compare_skipped_run <- run_script(
+  "compare_best_models.R",
+  args = c(
+    sprintf("--ranger-dir=%s", file.path(compare_skipped_fixture_root, "outputs_ranger")),
+    sprintf("--xgb-dir=%s", file.path(compare_skipped_fixture_root, "outputs_xgb")),
+    sprintf("--zinb-dir=%s", file.path(compare_skipped_fixture_root, "outputs_zinb_skipped")),
+    sprintf("--output-dir=%s", file.path(compare_skipped_fixture_root, "outputs_model_comparison"))
+  )
+)
+comparison_skipped_dt <- read_csv_if_exists(file.path(compare_skipped_fixture_root, "outputs_model_comparison", "best_models_comparison.csv"))
+compare_skipped_ok <- compare_skipped_run$status == 0 &&
+  !is.null(comparison_skipped_dt) &&
+  identical(as.character(comparison_skipped_dt[model == "zinb"]$availability_status[[1]]), "skipped") &&
+  grepl("intentionally skipped", comparison_skipped_dt[model == "zinb"]$availability_reason[[1]], fixed = TRUE) &&
+  is.na(comparison_skipped_dt[model == "zinb"]$rank[[1]]) &&
+  identical(as.integer(comparison_skipped_dt[model == "xgb"]$rank[[1]]), 1L)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "compare_best_models_excludes_skipped_zinb_from_ranking",
+  compare_skipped_ok,
+  if (compare_skipped_ok) {
+    "comparison output marks skipped ZINB explicitly and excludes it from ranking"
+  } else {
+    paste("compare_best_models.R did not handle skipped ZINB as expected:", compare_skipped_run$output)
+  }
+)
+
 # compare_best_models.R should allow a valid baseline-only ZINB run
 zinb_baseline_fixture_root <- file.path(TEST_OUTPUT_DIR, "compare_zinb_baseline_fixture")
 unlink(zinb_baseline_fixture_root, recursive = TRUE, force = TRUE)
@@ -670,6 +740,62 @@ tests[[length(tests) + 1L]] <- record_test(
     "run_summary.csv and run_summary_scripts.csv were created"
   } else {
     paste("write_run_summary.R did not create expected summary files:", summary_run$output)
+  }
+)
+
+# write_run_summary.R should mark intentional skips without failing the full run
+summary_skipped_fixture_root <- file.path(TEST_OUTPUT_DIR, "run_summary_skipped_fixture")
+unlink(summary_skipped_fixture_root, recursive = TRUE, force = TRUE)
+for (dir_name in c("outputs_validation", "outputs_ranger", "outputs_xgb", "outputs_zinb_skipped", "outputs_model_comparison")) {
+  dir.create(file.path(summary_skipped_fixture_root, dir_name), recursive = TRUE, showWarnings = FALSE)
+}
+safe_write_csv(
+  data.table(script_name = "validate_repo", status = "completed", start_time = "2026-04-23 10:00:00 CEST", end_time = "2026-04-23 10:00:05 CEST", runtime_seconds = 5),
+  file.path(summary_skipped_fixture_root, "outputs_validation", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(script_name = "mlr3_ranger_tuning", status = "completed", start_time = "2026-04-23 10:00:05 CEST", end_time = "2026-04-23 10:01:00 CEST", runtime_seconds = 55),
+  file.path(summary_skipped_fixture_root, "outputs_ranger", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(script_name = "mlr3_xgb_tuning", status = "completed", start_time = "2026-04-23 10:01:00 CEST", end_time = "2026-04-23 10:02:00 CEST", runtime_seconds = 60),
+  file.path(summary_skipped_fixture_root, "outputs_xgb", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(script_name = "zinb_stepwise_cv", status = "skipped", start_time = "2026-04-23 10:02:00 CEST", end_time = "2026-04-23 10:02:00 CEST", runtime_seconds = 0),
+  file.path(summary_skipped_fixture_root, "outputs_zinb_skipped", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(script_name = "compare_best_models", status = "completed", start_time = "2026-04-23 10:02:00 CEST", end_time = "2026-04-23 10:02:05 CEST", runtime_seconds = 5),
+  file.path(summary_skipped_fixture_root, "outputs_model_comparison", "run_manifest.csv")
+)
+safe_write_csv(
+  data.table(rank = 1, model = "xgb", rmse = 1.0, mae = 0.7, r2 = 0.4),
+  file.path(summary_skipped_fixture_root, "outputs_model_comparison", "best_models_comparison.csv")
+)
+
+summary_skipped_run <- run_script(
+  "write_run_summary.R",
+  env = c(
+    sprintf("RUN_OUTPUT_ROOT=%s", summary_skipped_fixture_root),
+    sprintf("ZINB_OUTPUT_DIR=%s", file.path(summary_skipped_fixture_root, "outputs_zinb_skipped"))
+  )
+)
+summary_skipped_dt <- read_csv_if_exists(file.path(summary_skipped_fixture_root, "run_summary.csv"))
+summary_skipped_scripts_dt <- read_csv_if_exists(file.path(summary_skipped_fixture_root, "run_summary_scripts.csv"))
+summary_skipped_ok <- summary_skipped_run$status == 0 &&
+  !is.null(summary_skipped_dt) &&
+  !is.null(summary_skipped_scripts_dt) &&
+  identical(as.character(summary_skipped_dt$run_status[[1]]), "completed_with_skips") &&
+  identical(as.character(summary_skipped_scripts_dt[script_name == "zinb_stepwise_cv"]$status[[1]]), "skipped")
+
+tests[[length(tests) + 1L]] <- record_test(
+  "write_run_summary_marks_skipped_zinb_without_failed_run",
+  summary_skipped_ok,
+  if (summary_skipped_ok) {
+    "run summary marks intentional ZINB skips as completed_with_skips"
+  } else {
+    paste("write_run_summary.R did not handle skipped ZINB as expected:", summary_skipped_run$output)
   }
 )
 

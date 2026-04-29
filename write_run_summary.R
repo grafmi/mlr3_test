@@ -79,10 +79,16 @@ manifests <- lapply(dirs, function(path) read_csv_if_exists(file.path(path, "run
 first_manifest <- Filter(function(x) !is.null(x) && nrow(x) > 0, manifests)
 first_manifest <- if (length(first_manifest) > 0) first_manifest[[1]] else NULL
 
-run_status <- if (all(script_summary$status == "completed", na.rm = TRUE) && all(!is.na(script_summary$status))) {
+script_status_known <- !is.na(script_summary$status)
+script_completed <- script_summary$status == "completed"
+script_completed_or_skipped <- script_summary$status %in% c("completed", "skipped")
+
+run_status <- if (all(script_completed & script_status_known)) {
   "completed"
 } else if (any(script_summary$status == "failed", na.rm = TRUE)) {
   "failed"
+} else if (all(script_completed_or_skipped & script_status_known)) {
+  "completed_with_skips"
 } else {
   "partial"
 }
