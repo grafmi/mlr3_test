@@ -249,7 +249,7 @@ modeling:
   grouped CV or aggregation should be considered
 - `validate_repo.R` also warns about very small validation folds and constant or
   near-constant predictors, and writes a `resolved_config` snapshot alongside
-  `validation_checks.csv`
+  `validation_checks.csv` and `validation_report.md`
 
 By default, `run_all.sh` versions each full run under a timestamped directory:
 

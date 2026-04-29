@@ -59,6 +59,54 @@ record_check <- function(name, ok, details) {
   data.table(check = name, ok = isTRUE(ok), details = as.character(details))
 }
 
+markdown_escape <- function(x) {
+  x <- as.character(x)
+  x <- gsub("\\|", "\\\\|", x)
+  x <- gsub("\r?\n", " ", x)
+  x
+}
+
+write_validation_report <- function(output_dir, checks_dt, resolved_config) {
+  n_failed <- nrow(checks_dt[ok == FALSE])
+  status <- if (n_failed == 0) "passed" else "failed"
+  check_rows <- apply(checks_dt, 1, function(row) {
+    sprintf(
+      "| `%s` | `%s` | %s |",
+      markdown_escape(row[["check"]]),
+      markdown_escape(row[["ok"]]),
+      markdown_escape(row[["details"]])
+    )
+  })
+
+  report_lines <- c(
+    sprintf("# %s Report", SCRIPT_NAME),
+    "",
+    "## Status",
+    sprintf("- status: `%s`", status),
+    sprintf("- failed_checks: `%s`", n_failed),
+    "",
+    "## Run",
+    sprintf("- data_path: `%s`", resolved_config$data_path),
+    sprintf("- output_dir: `%s`", resolved_config$output_dir),
+    sprintf("- target: `%s`", resolved_config$target),
+    sprintf("- feature_cols: `%s`", paste(resolved_config$feature_cols, collapse = ", ")),
+    sprintf("- id_cols: `%s`", if (length(resolved_config$id_cols) > 0) paste(resolved_config$id_cols, collapse = ", ") else "<none>"),
+    sprintf("- row_filter: `%s`", if (nzchar(trimws(resolved_config$row_filter))) resolved_config$row_filter else "<none>"),
+    sprintf("- outer_folds: `%s`", resolved_config$n_folds),
+    sprintf("- inner_folds: `%s`", resolved_config$inner_folds),
+    sprintf("- missing_drop_warn_fraction: `%s`", if (is.na(resolved_config$missing_drop_warn_fraction)) "<disabled>" else resolved_config$missing_drop_warn_fraction),
+    "",
+    "## Checks",
+    "| check | ok | details |",
+    "|---|---:|---|",
+    check_rows,
+    "",
+    "## Notes",
+    "- Diagnostic warnings, such as small folds or low-information features, are written to `validate_repo.log`."
+  )
+  write_text_file(file.path(output_dir, "validation_report.md"), report_lines)
+}
+
 check_output_dir_writable <- function(path) {
   dir.create(path, recursive = TRUE, showWarnings = FALSE)
   probe <- file.path(path, ".write_probe")
@@ -163,6 +211,7 @@ with_run_finalizer({
   checks <- c(checks, dataset_check)
   checks_dt <- rbindlist(checks, fill = TRUE)
   safe_write_csv(checks_dt, file.path(OUTPUT_DIR, "validation_checks.csv"))
+  write_validation_report(OUTPUT_DIR, checks_dt, resolved_config)
 
   failed_checks <- checks_dt[ok == FALSE]
   if (nrow(failed_checks) > 0) {

@@ -95,18 +95,27 @@ validate_checks_path <- file.path(validate_out, "validation_checks.csv")
 validate_log_path <- file.path(validate_out, "validate_repo.log")
 validate_manifest_path <- file.path(validate_out, "run_manifest.csv")
 validate_config_path <- file.path(validate_out, "resolved_config.rds")
+validate_report_path <- file.path(validate_out, "validation_report.md")
+validate_report <- if (file.exists(validate_report_path)) {
+  paste(readLines(validate_report_path, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
 
 validate_ok <- validate_run$status == 0 &&
   file.exists(validate_checks_path) &&
   file.exists(validate_log_path) &&
   file.exists(validate_manifest_path) &&
-  file.exists(validate_config_path)
+  file.exists(validate_config_path) &&
+  file.exists(validate_report_path) &&
+  grepl("# validate_repo Report", validate_report, fixed = TRUE) &&
+  grepl("| `required_packages` | `TRUE` |", validate_report, fixed = TRUE)
 
 tests[[length(tests) + 1L]] <- record_test(
   "validate_repo_success",
   validate_ok,
   if (validate_ok) {
-    "validate_repo.R completed and wrote checks, log, manifest, and config snapshot"
+    "validate_repo.R completed and wrote checks, log, manifest, config snapshot, and report"
   } else {
     paste("validate_repo.R failed:", validate_run$output)
   }
