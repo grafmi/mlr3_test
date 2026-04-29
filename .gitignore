@@ -3,6 +3,7 @@ outputs_xgb/
 outputs_zinb/
 outputs_model_comparison/
 outputs_regression_tests/
+outputs_validation/
 results/
 .Rhistory
 .RData
