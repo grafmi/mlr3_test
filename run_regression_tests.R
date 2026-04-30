@@ -218,6 +218,70 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
+# Year-blocked outer validation should hold out complete years without changing
+# the prediction schema used by compare_best_models.R.
+year_block_fixture_dir <- file.path(TEST_OUTPUT_DIR, "year_block_fixture")
+unlink(year_block_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(year_block_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+year_block_input <- file.path(year_block_fixture_dir, "input.csv")
+year_block_dt <- data.table(
+  target = c(1, 2, 3, 4, 2, 3, 4, 5, 3, 4, 5, 6),
+  feature_a = c(10, 12, 14, 16, 20, 22, 24, 26, 30, 32, 34, 36),
+  year = rep(c(2021L, 2022L, 2023L), each = 4L)
+)
+safe_write_csv(year_block_dt, year_block_input)
+
+year_block_out <- file.path(year_block_fixture_dir, "outputs")
+year_block_run <- run_script(
+  "mlr3_ranger_tuning.R",
+  args = c(
+    sprintf("--data=%s", year_block_input),
+    sprintf("--output-dir=%s", year_block_out),
+    "--target=target",
+    "--features=feature_a",
+    "--outer-resampling=year_blocked",
+    "--outer-block-col=year",
+    "--inner-folds=2",
+    "--tune-evals=1",
+    "--workers=1"
+  )
+)
+year_block_predictions <- read_csv_if_exists(file.path(year_block_out, "ranger_cv_predictions.csv"))
+year_block_plan <- read_csv_if_exists(file.path(year_block_out, "ranger_outer_fold_blocks.csv"))
+year_block_config <- if (file.exists(file.path(year_block_out, "resolved_config.rds"))) {
+  readRDS(file.path(year_block_out, "resolved_config.rds"))
+} else {
+  list()
+}
+year_by_prediction_fold <- if (!is.null(year_block_predictions)) {
+  data.table(
+    fold = year_block_predictions$fold,
+    year = year_block_dt$year[year_block_predictions$row_id]
+  )[, .(n_years = uniqueN(year)), by = fold]
+} else {
+  data.table()
+}
+year_block_ok <- year_block_run$status == 0 &&
+  !is.null(year_block_predictions) &&
+  !is.null(year_block_plan) &&
+  identical(year_block_config$outer_resampling, "year_blocked") &&
+  nrow(year_block_plan) == 3L &&
+  length(unique(year_block_predictions$fold)) == 3L &&
+  nrow(year_by_prediction_fold) == 3L &&
+  all(year_by_prediction_fold$n_years == 1L) &&
+  !("year" %in% names(year_block_predictions))
+
+tests[[length(tests) + 1L]] <- record_test(
+  "year_blocked_outer_cv_holds_out_complete_years",
+  year_block_ok,
+  if (year_block_ok) {
+    "year-blocked outer CV held out complete years and kept prediction schema stable"
+  } else {
+    paste("year-blocked ranger run did not produce expected outputs:", year_block_run$output)
+  }
+)
+
 # validate_repo.R should warn when missing-value row drops exceed the threshold
 missing_warn_fixture_dir <- file.path(TEST_OUTPUT_DIR, "missing_warn_fixture")
 unlink(missing_warn_fixture_dir, recursive = TRUE, force = TRUE)

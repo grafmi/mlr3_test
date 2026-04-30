@@ -338,6 +338,7 @@ Rscript preprocess_data.R --chars-to-factors=true --factor-min-count=5
 Rscript mlr3_ranger_tuning.R --row-filter="split == 'train'" --features=prcrank,potenzielle_kunden
 Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5 --tune-evals=20 --tune-batch-size=4 --workers=16
 Rscript mlr3_ranger_tuning.R --outer-repeats=3 --folds=5 --inner-folds=3
+Rscript mlr3_ranger_tuning.R --outer-resampling=year_blocked --outer-block-col=year
 Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom --tune-batch-size=4
 Rscript zinb_stepwise_cv.R --metric=poisson_deviance --max-vars=3 --workers=4
 Rscript zinb_stepwise_cv.R --features=prcrank,potenzielle_kunden
@@ -353,7 +354,8 @@ The same settings can be controlled with environment variables, for example
 `PREPROCESS_DROP_COLS`, `PREPROCESS_DROP_MISSING_ROWS`,
 `PREPROCESS_SAMPLE_ROWS`, `PREPROCESS_SAMPLE_SEED`,
 `PREPROCESS_CHARS_TO_FACTORS`, `PREPROCESS_FACTOR_MIN_COUNT`,
-`MLR3_DATA_PATH`, `ROW_FILTER`, `N_FOLDS`, `INNER_FOLDS`, `OUTER_REPEATS`, `TUNE_EVALS`, `N_WORKERS`,
+`MLR3_DATA_PATH`, `ROW_FILTER`, `N_FOLDS`, `INNER_FOLDS`, `OUTER_REPEATS`,
+`OUTER_RESAMPLING`, `OUTER_BLOCK_COL`, `OUTER_YEAR_COL`, `TUNE_EVALS`, `N_WORKERS`,
 `TUNE_BATCH_SIZE`, `RANGER_TUNE_BATCH_SIZE`, `XGB_TUNE_BATCH_SIZE`,
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
 `COMPARISON_OUTPUT_DIR`. The full-run wrapper also supports `RUN_ZINB=false`
@@ -386,6 +388,12 @@ you want faster tuning runs without changing the outer validation design.
 If you want a more stable validation estimate for `ranger` or `xgboost`,
 increase `outer_repeats`; if it is omitted in the config or on the command
 line, the scripts keep the historical single-repeat behavior.
+Set `outer_resampling = "year_blocked"` (or pass
+`--outer-resampling=year_blocked`) to hold out one complete year per outer
+fold. `outer_block_col` / `--outer-block-col` names the year column; it is used
+only for splitting unless it is also explicitly listed in the model features.
+Year-blocked outer validation is deterministic, so `outer_repeats` must remain
+`1`.
 
 As a practical rule of thumb:
 

@@ -63,6 +63,15 @@ DATA_PATH <- get_path_setting(
 OUTPUT_DIR <- get_path_setting("output-dir", "ZINB_OUTPUT_DIR", config_value(CONFIG, c("zinb", "output_dir")), base_dir = REPO_DIR)
 N_FOLDS <- get_int_setting("folds", "N_FOLDS", config_value(CONFIG, c("experiment", "n_folds")), min_value = 2)
 INNER_FOLDS <- get_int_setting("inner-folds", "INNER_FOLDS", config_value(CONFIG, c("experiment", "inner_folds")), min_value = 2)
+OUTER_RESAMPLING <- normalize_outer_resampling(get_setting(
+  "outer-resampling", "OUTER_RESAMPLING",
+  config_value_or(CONFIG, c("experiment", "outer_resampling"), "stratified")
+))
+OUTER_BLOCK_COL <- normalize_optional_string(get_setting(
+  "outer-block-col", "OUTER_BLOCK_COL",
+  get_setting("outer-year-col", "OUTER_YEAR_COL", config_value_or(CONFIG, c("experiment", "outer_block_col"), "year"))
+))
+if (identical(OUTER_RESAMPLING, "year_blocked") && is.na(OUTER_BLOCK_COL)) OUTER_BLOCK_COL <- "year"
 SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
 STRATA_BINS <- get_int_setting("strata-bins", "STRATA_BINS", config_value(CONFIG, c("experiment", "strata_bins")), min_value = 2)
 MISSING_DROP_WARN_FRACTION <- get_optional_numeric_setting(
@@ -908,18 +917,38 @@ evaluate_candidates_parallel <- function(candidate_specs, work_dt, target, fold_
 .script_ok <- FALSE
 LOG_STATE <- start_logging(OUTPUT_DIR, SCRIPT_NAME)
 with_run_finalizer({
+  if (identical(OUTER_RESAMPLING, "year_blocked") && identical(OUTER_BLOCK_COL, TARGET)) {
+    stop("OUTER_BLOCK_COL must not be the target column.", call. = FALSE)
+  }
+
   set.seed(SEED)
   df <- load_csv_checked(DATA_PATH)
   zero_formula_cols <- if (identical(ZERO_INFLATION_FORMULA, "same_as_count")) character(0) else {
     formula_referenced_columns(ZERO_INFLATION_FORMULA, label = "ZINB zero-formula")
   }
-  work_dt <- prepare_modeling_data(
+  split_dt <- prepare_modeling_data(
     df, TARGET, FEATURE_COLS, ID_COLS,
     require_count_target = TRUE,
     row_filter = ROW_FILTER,
-    extra_feature_cols = zero_formula_cols,
+    extra_feature_cols = unique(c(
+      zero_formula_cols,
+      if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else character(0)
+    )),
     missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
   )
+  outer_block_values <- if (identical(OUTER_RESAMPLING, "year_blocked")) split_dt[[OUTER_BLOCK_COL]] else NULL
+  keep_block_col <- OUTER_BLOCK_COL %in% unique(c(FEATURE_COLS, zero_formula_cols))
+  work_dt <- if (identical(OUTER_RESAMPLING, "year_blocked") && !keep_block_col) {
+    split_dt[, setdiff(names(split_dt), OUTER_BLOCK_COL), with = FALSE]
+  } else {
+    split_dt
+  }
+  effective_outer_folds <- if (identical(OUTER_RESAMPLING, "year_blocked")) {
+    year_plan <- make_year_blocked_fold_ids(outer_block_values, block_col = OUTER_BLOCK_COL)
+    nrow(year_plan$fold_plan)
+  } else {
+    N_FOLDS
+  }
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
   resolved_config <- list(
     script_name = SCRIPT_NAME,
@@ -933,7 +962,10 @@ with_run_finalizer({
     row_filter = ROW_FILTER,
     seed = SEED,
     n_folds = N_FOLDS,
+    effective_outer_folds = effective_outer_folds,
     inner_folds = INNER_FOLDS,
+    outer_resampling = OUTER_RESAMPLING,
+    outer_block_col = if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else NA_character_,
     strata_bins = STRATA_BINS,
     missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION,
     metric = METRIC_TO_OPTIMIZE,
@@ -965,7 +997,10 @@ with_run_finalizer({
     metric = METRIC_TO_OPTIMIZE,
     extra = list(
       "Folds" = N_FOLDS,
+      "Effective outer folds" = effective_outer_folds,
       "Inner folds" = INNER_FOLDS,
+      "Outer resampling" = OUTER_RESAMPLING,
+      "Outer block column" = if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else "<none>",
       "Missing-drop warn fraction" = if (is.na(MISSING_DROP_WARN_FRACTION)) "<disabled>" else MISSING_DROP_WARN_FRACTION,
       "Workers" = N_WORKERS,
       "Verbosity" = ZINB_VERBOSITY,
@@ -985,7 +1020,15 @@ with_run_finalizer({
 
   predictor_pool <- FEATURE_COLS
   selection_fold_ids <- make_stratified_fold_ids(work_dt[[TARGET]], nfolds = INNER_FOLDS, seed = SEED, n_bins = STRATA_BINS)
-  outer_fold_ids <- make_stratified_fold_ids(work_dt[[TARGET]], nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
+  outer_fold_plan <- NULL
+  outer_fold_ids <- if (identical(OUTER_RESAMPLING, "year_blocked")) {
+    blocked_plan <- make_year_blocked_fold_ids(outer_block_values, block_col = OUTER_BLOCK_COL)
+    outer_fold_plan <- blocked_plan$fold_plan
+    blocked_plan$fold_ids
+  } else {
+    make_stratified_fold_ids(work_dt[[TARGET]], nfolds = N_FOLDS, seed = SEED, n_bins = STRATA_BINS)
+  }
+  effective_outer_folds <- max(outer_fold_ids)
   zinb_progress_info(
     NULL,
     "Starting full-data ZINB selection for interpretation with ",
@@ -1024,8 +1067,8 @@ with_run_finalizer({
 
   outer_predictions <- list()
   outer_selected_models <- list()
-  zinb_progress_info(NULL, "Starting outer CV evaluation across ", N_FOLDS, " fold(s)", level = "batch")
-  for (fold in seq_len(N_FOLDS)) {
+  zinb_progress_info(NULL, "Starting outer CV evaluation across ", effective_outer_folds, " fold(s)", level = "batch")
+  for (fold in seq_len(effective_outer_folds)) {
     fold_started_at <- Sys.time()
     train_dt <- work_dt[outer_fold_ids != fold]
     test_dt <- work_dt[outer_fold_ids == fold]
@@ -1035,7 +1078,7 @@ with_run_finalizer({
     }
     zinb_progress_info(
       NULL,
-      "Outer fold ", fold, "/", N_FOLDS,
+      "Outer fold ", fold, "/", effective_outer_folds,
       ": train rows=", nrow(train_dt),
       ", test rows=", nrow(test_dt),
       ", inner folds=", inner_folds_now,
@@ -1090,7 +1133,7 @@ with_run_finalizer({
     )
     zinb_progress_info(
       NULL,
-      "Outer fold ", fold, "/", N_FOLDS, " finished in ",
+      "Outer fold ", fold, "/", effective_outer_folds, " finished in ",
       format(round(as.numeric(difftime(Sys.time(), fold_started_at, units = "secs")), 2), nsmall = 2),
       "s with formula ", formula_label(fold_selection$final_formula_obj),
       level = "batch"
@@ -1104,6 +1147,9 @@ with_run_finalizer({
   safe_write_csv(zinb_outer_overall_metrics, file.path(OUTPUT_DIR, "zinb_best_global_overall_metrics.csv"))
   safe_write_csv(zinb_outer_predictions, file.path(OUTPUT_DIR, "zinb_best_global_cv_predictions.csv"))
   safe_write_csv(rbindlist(outer_selected_models, fill = TRUE), file.path(OUTPUT_DIR, "zinb_outer_fold_selected_models.csv"))
+  if (!is.null(outer_fold_plan) && nrow(outer_fold_plan) > 0) {
+    safe_write_csv(outer_fold_plan, file.path(OUTPUT_DIR, "zinb_outer_fold_blocks.csv"))
+  }
 
   final_formula_obj <- full_data_selection$final_formula_obj
   final_summary_line <- full_data_selection$final_summary_line
@@ -1172,8 +1218,10 @@ with_run_finalizer({
     sprintf("- feature_cols: `%s`", paste(FEATURE_COLS, collapse = ", ")),
     sprintf("- zero_inflation_formula: `%s`", ZERO_INFLATION_FORMULA),
     sprintf("- seed: `%s`", SEED),
-    sprintf("- folds: `%s`", N_FOLDS),
+    sprintf("- folds: `%s`", effective_outer_folds),
     sprintf("- inner_folds: `%s`", INNER_FOLDS),
+    sprintf("- outer_resampling: `%s`", OUTER_RESAMPLING),
+    sprintf("- outer_block_col: `%s`", if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else "<none>"),
     sprintf("- workers: `%s`", N_WORKERS),
     sprintf("- verbosity: `%s`", ZINB_VERBOSITY),
     sprintf("- parallel_backend: `%s`", PARALLEL_BACKEND),
@@ -1200,6 +1248,7 @@ with_run_finalizer({
     "- `zinb_failed_candidates.csv` / `.rds`",
     "- `zinb_best_model_per_step.csv` / `.rds`",
     "- `zinb_outer_fold_selected_models.csv` / `.rds`",
+    "- `zinb_outer_fold_blocks.csv` / `.rds` when year-blocked outer validation is used",
     "- `zinb_final_model_summary.csv` / `.rds`",
     "- `zinb_final_model_count_coefficients.csv` / `.rds`",
     "- `zinb_final_model_zero_coefficients.csv` / `.rds`",

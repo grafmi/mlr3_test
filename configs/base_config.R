@@ -23,6 +23,12 @@ CONFIG <- list(
     # Number of repeated outer-CV runs for the mlr3 nested validation. Keep
     # this at 1 for the historical single-run behavior.
     outer_repeats = 1L,
+    # Outer validation split strategy. Use "stratified" for the historical
+    # target-stratified folds, or "year_blocked" to hold out one complete year
+    # per outer fold. In year-blocked mode `outer_block_col` is used only for
+    # splitting unless it is also listed in feature_cols.
+    outer_resampling = "stratified",
+    outer_block_col = "year",
     # Number of folds used in the inner tuning loop for mlr3 models. This can
     # be smaller than `n_folds` to speed up tuning while keeping the outer
     # validation loop unchanged.

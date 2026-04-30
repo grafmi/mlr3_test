@@ -178,6 +178,14 @@ get_bool_setting <- function(arg_name, env_name, default = FALSE) {
   stop(sprintf("Setting '%s' must be TRUE/FALSE.", arg_name), call. = FALSE)
 }
 
+normalize_outer_resampling <- function(value) {
+  value <- tolower(trimws(as.character(value)[1]))
+  value <- gsub("-", "_", value, fixed = TRUE)
+  if (value %in% c("stratified", "stratified_cv", "default")) return("stratified")
+  if (value %in% c("year", "year_blocked", "blocked_year", "by_year", "leave_one_year_out")) return("year_blocked")
+  stop("outer_resampling must be 'stratified' or 'year_blocked'.", call. = FALSE)
+}
+
 coerce_character_columns_to_factor <- function(dt, exclude_cols = character(0)) {
   out <- data.table::copy(dt)
   candidate_cols <- setdiff(names(out), exclude_cols)
@@ -576,7 +584,7 @@ prepare_modeling_data <- function(df, target, feature_cols, id_cols = character(
 
   warn_if_duplicate_id_rows(dt, id_cols = id_cols, context = "modeling data after row filtering")
 
-  keep_cols <- setdiff(c(target, feature_cols, extra_feature_cols), id_cols)
+  keep_cols <- unique(c(setdiff(c(target, feature_cols), id_cols), extra_feature_cols))
   dt <- dt[, ..keep_cols]
 
   if (!is.numeric(dt[[target]])) {
@@ -663,15 +671,71 @@ make_stratified_fold_ids <- function(y, nfolds = 10, seed = 123, n_bins = 10) {
   fold_ids
 }
 
-make_stratified_custom_cv <- function(task, target, nfolds = 10, seed = 123, n_bins = 10) {
-  y <- task$data(cols = target)[[1]]
-  fold_ids <- make_stratified_fold_ids(y, nfolds = nfolds, seed = seed, n_bins = n_bins)
+make_year_blocked_fold_ids <- function(year_values, block_col = "year") {
+  if (length(year_values) == 0) {
+    stop("Year-blocked outer validation needs at least one row.", call. = FALSE)
+  }
+
+  year_labels <- trimws(as.character(year_values))
+  if (anyNA(year_labels) || any(!nzchar(year_labels))) {
+    stop(
+      "Year-blocked outer validation column '", block_col,
+      "' must not contain missing or blank values after filtering.",
+      call. = FALSE
+    )
+  }
+
+  unique_years <- unique(year_labels)
+  if (length(unique_years) < 2L) {
+    stop(
+      "Year-blocked outer validation needs at least two distinct values in column '",
+      block_col, "'.",
+      call. = FALSE
+    )
+  }
+
+  numeric_years <- suppressWarnings(as.numeric(unique_years))
+  year_order <- if (all(!is.na(numeric_years))) {
+    order(numeric_years, unique_years)
+  } else {
+    order(unique_years)
+  }
+  ordered_years <- unique_years[year_order]
+  fold_ids <- match(year_labels, ordered_years)
+  fold_plan <- data.table::data.table(
+    fold = seq_along(ordered_years),
+    outer_block_col = block_col,
+    outer_block_value = ordered_years,
+    n_rows = as.integer(tabulate(fold_ids, nbins = length(ordered_years)))
+  )
+
+  list(fold_ids = fold_ids, fold_plan = fold_plan)
+}
+
+make_custom_cv_from_fold_ids <- function(task, fold_ids) {
+  if (length(fold_ids) != task$nrow) {
+    stop("Fold IDs must have the same length as the task row count.", call. = FALSE)
+  }
+  if (anyNA(fold_ids)) stop("Fold IDs must not contain NA values.", call. = FALSE)
+  nfolds <- max(fold_ids)
+  if (nfolds < 2L) stop("Outer CV needs at least two folds.", call. = FALSE)
+  missing_folds <- setdiff(seq_len(nfolds), unique(fold_ids))
+  if (length(missing_folds) > 0) {
+    stop("Outer CV fold IDs contain empty fold(s): ", paste(missing_folds, collapse = ", "), call. = FALSE)
+  }
+
   test_sets <- lapply(seq_len(nfolds), function(k) which(fold_ids == k))
-  train_sets <- lapply(test_sets, function(test) setdiff(seq_along(y), test))
+  train_sets <- lapply(test_sets, function(test) setdiff(seq_len(task$nrow), test))
 
   rsmp_custom <- mlr3::rsmp("custom")
   rsmp_custom$instantiate(task, train_sets = train_sets, test_sets = test_sets)
   rsmp_custom
+}
+
+make_stratified_custom_cv <- function(task, target, nfolds = 10, seed = 123, n_bins = 10) {
+  y <- task$data(cols = target)[[1]]
+  fold_ids <- make_stratified_fold_ids(y, nfolds = nfolds, seed = seed, n_bins = n_bins)
+  make_custom_cv_from_fold_ids(task, fold_ids)
 }
 
 poisson_deviance_score <- function(truth, mean_pred) {
@@ -954,25 +1018,40 @@ run_autotuner_outer_cv <- function(task, auto_tuner, outer_cv, seed,
 run_repeated_autotuner_outer_cv <- function(task, auto_tuner, target, n_folds,
                                             outer_repeats = 1L, seed, n_bins = 10,
                                             progress_prefix = NULL,
-                                            measure_col = "regr.rmse") {
+                                            measure_col = "regr.rmse",
+                                            outer_resampling = "stratified",
+                                            outer_block_values = NULL,
+                                            outer_block_col = NULL) {
   if (outer_repeats < 1L) {
     stop("outer_repeats must be at least 1.", call. = FALSE)
+  }
+  outer_resampling <- normalize_outer_resampling(outer_resampling)
+  if (identical(outer_resampling, "year_blocked") && outer_repeats > 1L) {
+    stop("outer_repeats must be 1 when outer_resampling='year_blocked'.", call. = FALSE)
   }
 
   predictions_by_repeat <- vector("list", outer_repeats)
   tuning_by_repeat <- vector("list", outer_repeats)
   learners_by_repeat <- vector("list", outer_repeats)
   include_repeat <- outer_repeats > 1L
+  fold_plan <- NULL
 
   for (repeat_idx in seq_len(outer_repeats)) {
     repeat_seed <- as.integer(seed) + (repeat_idx - 1L) * 1000L
-    outer_cv <- make_stratified_custom_cv(
-      task,
-      target = target,
-      nfolds = n_folds,
-      seed = repeat_seed,
-      n_bins = n_bins
-    )
+    if (identical(outer_resampling, "year_blocked")) {
+      block_col <- if (is.null(outer_block_col) || is.na(outer_block_col) || !nzchar(outer_block_col)) "year" else outer_block_col
+      blocked_plan <- make_year_blocked_fold_ids(outer_block_values, block_col = block_col)
+      fold_plan <- blocked_plan$fold_plan
+      outer_cv <- make_custom_cv_from_fold_ids(task, blocked_plan$fold_ids)
+    } else {
+      outer_cv <- make_stratified_custom_cv(
+        task,
+        target = target,
+        nfolds = n_folds,
+        seed = repeat_seed,
+        n_bins = n_bins
+      )
+    }
     repeat_run <- run_autotuner_outer_cv(
       task = task,
       auto_tuner = auto_tuner,
@@ -1000,7 +1079,8 @@ run_repeated_autotuner_outer_cv <- function(task, auto_tuner, target, n_folds,
   list(
     predictions = predictions,
     tuning_results = tuning_results,
-    learners = learners_by_repeat
+    learners = learners_by_repeat,
+    fold_plan = fold_plan
   )
 }
 
@@ -1009,9 +1089,16 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
                                                     seed, n_bins = 10,
                                                     task_id = "encoded_regression",
                                                     progress_prefix = NULL,
-                                                    measure_col = "regr.rmse") {
+                                                    measure_col = "regr.rmse",
+                                                    outer_resampling = "stratified",
+                                                    outer_block_values = NULL,
+                                                    outer_block_col = NULL) {
   if (outer_repeats < 1L) {
     stop("outer_repeats must be at least 1.", call. = FALSE)
+  }
+  outer_resampling <- normalize_outer_resampling(outer_resampling)
+  if (identical(outer_resampling, "year_blocked") && outer_repeats > 1L) {
+    stop("outer_repeats must be 1 when outer_resampling='year_blocked'.", call. = FALSE)
   }
 
   raw_dt <- data.table::as.data.table(data.table::copy(raw_dt))
@@ -1020,6 +1107,7 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
   learners_by_repeat <- vector("list", outer_repeats)
   unseen_by_repeat <- vector("list", outer_repeats)
   include_repeat <- outer_repeats > 1L
+  fold_plan <- NULL
 
   log_progress <- function(...) {
     if (!is.null(progress_prefix) && nzchar(progress_prefix)) {
@@ -1031,24 +1119,32 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
 
   for (repeat_idx in seq_len(outer_repeats)) {
     repeat_seed <- as.integer(seed) + (repeat_idx - 1L) * 1000L
-    fold_ids <- make_stratified_fold_ids(raw_dt[[target]], nfolds = n_folds, seed = repeat_seed, n_bins = n_bins)
-    prediction_rows <- vector("list", n_folds)
-    tuning_rows <- vector("list", n_folds)
-    fitted_learners <- vector("list", n_folds)
-    unseen_rows <- vector("list", n_folds)
+    if (identical(outer_resampling, "year_blocked")) {
+      block_col <- if (is.null(outer_block_col) || is.na(outer_block_col) || !nzchar(outer_block_col)) "year" else outer_block_col
+      blocked_plan <- make_year_blocked_fold_ids(outer_block_values, block_col = block_col)
+      fold_ids <- blocked_plan$fold_ids
+      fold_plan <- blocked_plan$fold_plan
+    } else {
+      fold_ids <- make_stratified_fold_ids(raw_dt[[target]], nfolds = n_folds, seed = repeat_seed, n_bins = n_bins)
+    }
+    effective_n_folds <- max(fold_ids)
+    prediction_rows <- vector("list", effective_n_folds)
+    tuning_rows <- vector("list", effective_n_folds)
+    fitted_learners <- vector("list", effective_n_folds)
+    unseen_rows <- vector("list", effective_n_folds)
 
     log_progress(
       if (include_repeat) paste0("repeat ", repeat_idx, ": ") else "",
-      "starting encoded outer CV across ", n_folds, " fold(s)"
+      "starting encoded outer CV across ", effective_n_folds, " fold(s)"
     )
 
-    for (fold in seq_len(n_folds)) {
+    for (fold in seq_len(effective_n_folds)) {
       fold_started_at <- Sys.time()
       train_ids <- which(fold_ids != fold)
       test_ids <- which(fold_ids == fold)
       log_progress(
         if (include_repeat) paste0("repeat ", repeat_idx, ", ") else "",
-        "outer fold ", fold, "/", n_folds,
+        "outer fold ", fold, "/", effective_n_folds,
         ": train rows=", length(train_ids),
         ", test rows=", length(test_ids)
       )
@@ -1100,7 +1196,7 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
 
       log_progress(
         if (include_repeat) paste0("repeat ", repeat_idx, ", ") else "",
-        "outer fold ", fold, "/", n_folds,
+        "outer fold ", fold, "/", effective_n_folds,
         " finished in ",
         format(round(as.numeric(difftime(Sys.time(), fold_started_at, units = "secs")), 2), nsmall = 2),
         "s"
@@ -1128,7 +1224,8 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
     predictions = predictions,
     tuning_results = tuning_results,
     learners = learners_by_repeat,
-    unseen_levels = unseen_levels
+    unseen_levels = unseen_levels,
+    fold_plan = fold_plan
   )
 }
 

@@ -52,6 +52,15 @@ DATA_PATH <- get_path_setting("data", "MLR3_DATA_PATH", config_value(CONFIG, c("
 OUTPUT_DIR <- get_path_setting("output-dir", "VALIDATION_OUTPUT_DIR", config_value(CONFIG, c("validation", "output_dir")), base_dir = REPO_DIR)
 N_FOLDS <- get_int_setting("folds", "N_FOLDS", config_value(CONFIG, c("experiment", "n_folds")), min_value = 2)
 INNER_FOLDS <- get_int_setting("inner-folds", "INNER_FOLDS", config_value(CONFIG, c("experiment", "inner_folds")), min_value = 2)
+OUTER_RESAMPLING <- normalize_outer_resampling(get_setting(
+  "outer-resampling", "OUTER_RESAMPLING",
+  config_value_or(CONFIG, c("experiment", "outer_resampling"), "stratified")
+))
+OUTER_BLOCK_COL <- normalize_optional_string(get_setting(
+  "outer-block-col", "OUTER_BLOCK_COL",
+  get_setting("outer-year-col", "OUTER_YEAR_COL", config_value_or(CONFIG, c("experiment", "outer_block_col"), "year"))
+))
+if (identical(OUTER_RESAMPLING, "year_blocked") && is.na(OUTER_BLOCK_COL)) OUTER_BLOCK_COL <- "year"
 MISSING_DROP_WARN_FRACTION <- get_optional_numeric_setting(
   "missing-drop-warn-fraction", "MISSING_DROP_WARN_FRACTION",
   config_value_or(CONFIG, c("experiment", "missing_drop_warn_fraction"), 0.05),
@@ -131,6 +140,8 @@ write_validation_report <- function(output_dir, checks_dt, resolved_config, dict
     sprintf("- row_filter: `%s`", if (nzchar(trimws(resolved_config$row_filter))) resolved_config$row_filter else "<none>"),
     sprintf("- outer_folds: `%s`", resolved_config$n_folds),
     sprintf("- inner_folds: `%s`", resolved_config$inner_folds),
+    sprintf("- outer_resampling: `%s`", resolved_config$outer_resampling),
+    sprintf("- outer_block_col: `%s`", if (!is.na(resolved_config$outer_block_col)) resolved_config$outer_block_col else "<none>"),
     sprintf("- missing_drop_warn_fraction: `%s`", if (is.na(resolved_config$missing_drop_warn_fraction)) "<disabled>" else resolved_config$missing_drop_warn_fraction),
     "",
     "## Checks",
@@ -218,6 +229,8 @@ with_run_finalizer({
     row_filter = ROW_FILTER,
     n_folds = N_FOLDS,
     inner_folds = INNER_FOLDS,
+    outer_resampling = OUTER_RESAMPLING,
+    outer_block_col = if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else NA_character_,
     missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
   )
   write_config_snapshot(OUTPUT_DIR, resolved_config)
@@ -245,8 +258,8 @@ with_run_finalizer({
 
   checks[[length(checks) + 1L]] <- record_check(
     "inner_folds_not_greater_than_outer_folds",
-    INNER_FOLDS <= N_FOLDS,
-    sprintf("inner_folds=%s, n_folds=%s", INNER_FOLDS, N_FOLDS)
+    !identical(OUTER_RESAMPLING, "stratified") || INNER_FOLDS <= N_FOLDS,
+    sprintf("inner_folds=%s, n_folds=%s, outer_resampling=%s", INNER_FOLDS, N_FOLDS, OUTER_RESAMPLING)
   )
 
   dataset_check <- tryCatch({
@@ -262,7 +275,10 @@ with_run_finalizer({
     dictionary_dt <- data.table::as.data.table(data.table::copy(df))
     dictionary_filter <- apply_row_filter_checked(dictionary_dt, ROW_FILTER, label = "Validation data-dictionary row filter")
     dictionary_dt <- dictionary_filter$data
-    dictionary_cols <- intersect(unique(c(TARGET, FEATURE_COLS, ZINB_FEATURE_COLS, ID_COLS, zero_formula_cols)), names(dictionary_dt))
+    dictionary_cols <- intersect(unique(c(
+      TARGET, FEATURE_COLS, ZINB_FEATURE_COLS, ID_COLS, zero_formula_cols,
+      if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else character(0)
+    )), names(dictionary_dt))
     dictionary_dt <- dictionary_dt[, ..dictionary_cols]
     validation_dictionary <<- data_dictionary(dictionary_dt, target = TARGET, feature_cols = unique(c(FEATURE_COLS, ZINB_FEATURE_COLS)), id_cols = ID_COLS)
     safe_write_csv(validation_dictionary, file.path(OUTPUT_DIR, "validation_data_dictionary.csv"))
@@ -271,7 +287,11 @@ with_run_finalizer({
       df, TARGET, FEATURE_COLS, ID_COLS,
       require_count_target = FALSE,
       row_filter = ROW_FILTER,
-      extra_feature_cols = unique(c(zero_formula_cols, zinb_extra_feature_cols)),
+      extra_feature_cols = unique(c(
+        zero_formula_cols,
+        zinb_extra_feature_cols,
+        if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else character(0)
+      )),
       missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
     )
 
@@ -280,7 +300,17 @@ with_run_finalizer({
       record_check("target_and_features_present", TRUE, paste(c(TARGET, FEATURE_COLS), collapse = ", ")),
       record_check("zinb_feature_cols_present", TRUE, paste(ZINB_FEATURE_COLS, collapse = ", "))
     )
-    warn_if_small_cv_folds(nrow(work_dt), N_FOLDS, context = "modeling data")
+    if (identical(OUTER_RESAMPLING, "year_blocked")) {
+      year_plan <- make_year_blocked_fold_ids(work_dt[[OUTER_BLOCK_COL]], block_col = OUTER_BLOCK_COL)
+      warn_if_small_cv_folds(nrow(work_dt), nrow(year_plan$fold_plan), context = "year-blocked modeling data")
+      checks_local[[length(checks_local) + 1L]] <- record_check(
+        "year_blocked_outer_validation_valid",
+        TRUE,
+        sprintf("%s outer fold(s) from %s", nrow(year_plan$fold_plan), OUTER_BLOCK_COL)
+      )
+    } else {
+      warn_if_small_cv_folds(nrow(work_dt), N_FOLDS, context = "modeling data")
+    }
     warn_if_low_information_features(work_dt, FEATURE_COLS, context = "modeling data")
     if (!identical(ZINB_FEATURE_COLS, FEATURE_COLS)) {
       warn_if_low_information_features(work_dt, ZINB_FEATURE_COLS, context = "ZINB modeling data")
