@@ -1232,21 +1232,25 @@ zinb_factor_run <- run_script(
     "--folds=2",
     "--metric=rmse",
     "--max-vars=1",
-    "--workers=1",
+    "--workers=2",
+    "--parallel-backend=psock",
     "--numeric-as-factor-max-levels=5",
     "--zero-formula=1"
   )
 )
 zinb_candidates <- read_csv_if_exists(file.path(zinb_factor_out, "zinb_all_candidates_by_step.csv"))
+zinb_factor_metrics <- read_csv_if_exists(file.path(zinb_factor_out, "zinb_best_global_overall_metrics.csv"))
 zinb_factor_ok <- zinb_factor_run$status == 0 &&
   !is.null(zinb_candidates) &&
-  nrow(zinb_candidates[variable == "age_band_num" & transformation == "factor"]) >= 1
+  nrow(zinb_candidates[variable == "age_band_num" & transformation == "factor"]) >= 1 &&
+  !is.null(zinb_factor_metrics) &&
+  "wape" %in% names(zinb_factor_metrics)
 
 tests[[length(tests) + 1L]] <- record_test(
   "zinb_considers_factor_candidates_for_numeric_features",
   zinb_factor_ok,
   if (zinb_factor_ok) {
-    "zinb_stepwise_cv.R considers factor() candidates for low-cardinality numeric features"
+    "zinb_stepwise_cv.R considers factor() candidates and reports WAPE through PSOCK workers"
   } else {
     paste("zinb_stepwise_cv.R did not expose the expected factor() candidate:", zinb_factor_run$output)
   }
