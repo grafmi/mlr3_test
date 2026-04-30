@@ -80,6 +80,10 @@ TARGET_DENOMINATOR_COL <- normalize_optional_string(get_setting(
   get_setting("target-denominator", "TARGET_DENOMINATOR", config_value_or(CONFIG, c("experiment", "target_denominator_col"), ""))
 ))
 WEIGHT_COL <- normalize_optional_string(get_setting("weight-col", "WEIGHT_COL", config_value_or(CONFIG, c("experiment", "weight_col"), "")))
+RANGER_TARGET_TRANSFORM <- normalize_target_transform(get_setting(
+  "ranger-target-transform", "RANGER_TARGET_TRANSFORM",
+  config_value_or(CONFIG, c("ranger", "target_transform"), "none")
+))
 SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
 TUNE_EVALS <- get_int_setting("tune-evals", "TUNE_EVALS", config_value(CONFIG, c("ranger", "tune_evals")), min_value = 1)
 TUNE_BATCH_SIZE <- get_int_setting(
@@ -150,7 +154,8 @@ with_run_finalizer({
     feature_cols = FEATURE_COLS,
     target_mode = TARGET_MODE,
     target_denominator_col = TARGET_DENOMINATOR_COL,
-    weight_col = WEIGHT_COL
+    weight_col = WEIGHT_COL,
+    target_transform = RANGER_TARGET_TRANSFORM
   )
   model_dt <- target_context$data
   effective_outer_folds <- if (identical(OUTER_RESAMPLING, "year_blocked")) {
@@ -176,6 +181,7 @@ with_run_finalizer({
     target = TARGET,
     model_target = target_context$target,
     target_mode = TARGET_MODE,
+    ranger_target_transform = RANGER_TARGET_TRANSFORM,
     target_denominator_col = target_context$target_denominator_col,
     weight_col = target_context$weight_col,
     feature_cols = FEATURE_COLS,
@@ -214,6 +220,7 @@ with_run_finalizer({
       "Outer resampling" = OUTER_RESAMPLING,
       "Outer block column" = if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else "<none>",
       "Target mode" = TARGET_MODE,
+      "Ranger target transform" = RANGER_TARGET_TRANSFORM,
       "Target denominator column" = if (!is.na(target_context$target_denominator_col)) target_context$target_denominator_col else "<none>",
       "Weight column" = if (!is.na(target_context$weight_col)) target_context$weight_col else "<none>",
       "Outer folds / inner folds" = paste(effective_outer_folds, INNER_FOLDS, sep = " / "),
@@ -363,6 +370,7 @@ with_run_finalizer({
     sprintf("- outer_resampling: `%s`", OUTER_RESAMPLING),
     sprintf("- outer_block_col: `%s`", if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else "<none>"),
     sprintf("- target_mode: `%s`", TARGET_MODE),
+    sprintf("- ranger_target_transform: `%s`", RANGER_TARGET_TRANSFORM),
     sprintf("- model_target: `%s`", target_context$target),
     sprintf("- target_denominator_col: `%s`", if (!is.na(target_context$target_denominator_col)) target_context$target_denominator_col else "<none>"),
     sprintf("- weight_col: `%s`", if (!is.na(target_context$weight_col)) target_context$weight_col else "<none>"),

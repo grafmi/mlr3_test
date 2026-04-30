@@ -80,6 +80,10 @@ TARGET_DENOMINATOR_COL <- normalize_optional_string(get_setting(
   get_setting("target-denominator", "TARGET_DENOMINATOR", config_value_or(CONFIG, c("experiment", "target_denominator_col"), ""))
 ))
 WEIGHT_COL <- normalize_optional_string(get_setting("weight-col", "WEIGHT_COL", config_value_or(CONFIG, c("experiment", "weight_col"), "")))
+XGB_OBJECTIVE <- normalize_optional_string(get_setting("xgb-objective", "XGB_OBJECTIVE", config_value_or(CONFIG, c("xgboost", "objective"), "reg:squarederror")))
+if (is.na(XGB_OBJECTIVE)) XGB_OBJECTIVE <- "reg:squarederror"
+XGB_EVAL_METRIC <- normalize_optional_string(get_setting("xgb-eval-metric", "XGB_EVAL_METRIC", config_value_or(CONFIG, c("xgboost", "eval_metric"), "")))
+XGB_EXPOSURE_COL <- normalize_optional_string(get_setting("xgb-exposure-col", "XGB_EXPOSURE_COL", config_value_or(CONFIG, c("xgboost", "exposure_col"), "")))
 SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
 TUNE_EVALS <- get_int_setting("tune-evals", "TUNE_EVALS", config_value(CONFIG, c("xgboost", "tune_evals")), min_value = 1)
 TUNE_BATCH_SIZE <- get_int_setting(
@@ -117,6 +121,24 @@ with_run_finalizer({
   if (!is.na(WEIGHT_COL) && identical(WEIGHT_COL, TARGET)) {
     stop("WEIGHT_COL must not be the target column.", call. = FALSE)
   }
+  if (!is.na(XGB_EXPOSURE_COL) && identical(XGB_EXPOSURE_COL, TARGET)) {
+    stop("XGB_EXPOSURE_COL must not be the target column.", call. = FALSE)
+  }
+  if (!is.na(XGB_EXPOSURE_COL) && XGB_EXPOSURE_COL %in% FEATURE_COLS) {
+    stop("XGB_EXPOSURE_COL should not also be listed in FEATURE_COLS; remove it from features so it is used only as an offset.", call. = FALSE)
+  }
+  if (!is.na(XGB_EXPOSURE_COL) && !identical(TARGET_MODE, "count")) {
+    stop("XGB_EXPOSURE_COL requires TARGET_MODE='count' because the Poisson offset model trains directly on counts.", call. = FALSE)
+  }
+  if (!is.na(XGB_EXPOSURE_COL) && !identical(XGB_OBJECTIVE, "count:poisson")) {
+    stop("XGB_EXPOSURE_COL currently requires XGB_OBJECTIVE='count:poisson'.", call. = FALSE)
+  }
+  if (!is.na(XGB_EXPOSURE_COL) && has_config_value(CONFIG, c("xgboost", "search_space", "objective"))) {
+    objective_levels <- config_value(CONFIG, c("xgboost", "search_space", "objective"))
+    if (!identical(unique(objective_levels), "count:poisson")) {
+      stop("When XGB_EXPOSURE_COL is set, xgboost.search_space.objective must be omitted or only contain 'count:poisson'.", call. = FALSE)
+    }
+  }
 
   set.seed(SEED)
   if (N_WORKERS > 1) {
@@ -134,7 +156,8 @@ with_run_finalizer({
     extra_feature_cols = unique(c(
       if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else character(0),
       if (identical(TARGET_MODE, "rate")) TARGET_DENOMINATOR_COL else character(0),
-      if (!is.na(WEIGHT_COL)) WEIGHT_COL else character(0)
+      if (!is.na(WEIGHT_COL)) WEIGHT_COL else character(0),
+      if (!is.na(XGB_EXPOSURE_COL)) XGB_EXPOSURE_COL else character(0)
     )),
     missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
   )
@@ -144,13 +167,26 @@ with_run_finalizer({
   } else {
     work_dt
   }
+  xgb_offset_col <- NA_character_
+  if (!is.na(XGB_EXPOSURE_COL)) {
+    exposure <- split_dt[[XGB_EXPOSURE_COL]]
+    if (!is.numeric(exposure)) {
+      stop("XGB_EXPOSURE_COL must be numeric: ", XGB_EXPOSURE_COL, call. = FALSE)
+    }
+    if (anyNA(exposure) || any(!is.finite(exposure)) || any(exposure <= 0)) {
+      stop("XGB_EXPOSURE_COL must contain only finite values > 0: ", XGB_EXPOSURE_COL, call. = FALSE)
+    }
+    xgb_offset_col <- ".xgb_base_margin"
+    split_dt[, (xgb_offset_col) := log(exposure)]
+  }
   target_context <- make_target_context(
     split_dt,
     target = TARGET,
     feature_cols = FEATURE_COLS,
     target_mode = TARGET_MODE,
     target_denominator_col = TARGET_DENOMINATOR_COL,
-    weight_col = WEIGHT_COL
+    weight_col = WEIGHT_COL,
+    offset_col = xgb_offset_col
   )
   model_dt <- target_context$data
   effective_outer_folds <- if (identical(OUTER_RESAMPLING, "year_blocked")) {
@@ -171,7 +207,8 @@ with_run_finalizer({
     model_dt,
     model_dt,
     target = target_context$target,
-    weight_col = target_context$model_weight_col
+    weight_col = target_context$model_weight_col,
+    offset_col = target_context$model_offset_col
   )$train
   dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
   resolved_config <- list(
@@ -184,6 +221,10 @@ with_run_finalizer({
     target_mode = TARGET_MODE,
     target_denominator_col = target_context$target_denominator_col,
     weight_col = target_context$weight_col,
+    xgb_objective = XGB_OBJECTIVE,
+    xgb_eval_metric = XGB_EVAL_METRIC,
+    xgb_exposure_col = XGB_EXPOSURE_COL,
+    xgb_offset_col = target_context$model_offset_col,
     feature_cols = FEATURE_COLS,
     id_cols = ID_COLS,
     row_filter = ROW_FILTER,
@@ -212,7 +253,7 @@ with_run_finalizer({
   log_dataset_overview(
     full_data_encoded,
     target = target_context$target,
-    feature_cols = setdiff(names(full_data_encoded), c(target_context$target, target_context$model_weight_col)),
+    feature_cols = setdiff(names(full_data_encoded), c(target_context$target, target_context$model_weight_col, target_context$model_offset_col)),
     id_cols = ID_COLS,
     metric = "rmse",
     extra = list(
@@ -224,6 +265,9 @@ with_run_finalizer({
       "Target mode" = TARGET_MODE,
       "Target denominator column" = if (!is.na(target_context$target_denominator_col)) target_context$target_denominator_col else "<none>",
       "Weight column" = if (!is.na(target_context$weight_col)) target_context$weight_col else "<none>",
+      "XGBoost objective" = XGB_OBJECTIVE,
+      "XGBoost eval metric" = if (!is.na(XGB_EVAL_METRIC)) XGB_EVAL_METRIC else "<default>",
+      "XGBoost exposure column" = if (!is.na(XGB_EXPOSURE_COL)) XGB_EXPOSURE_COL else "<none>",
       "Outer folds / inner folds" = paste(effective_outer_folds, INNER_FOLDS, sep = " / "),
       "Missing-drop warn fraction" = if (is.na(MISSING_DROP_WARN_FRACTION)) "<disabled>" else MISSING_DROP_WARN_FRACTION,
       "Tuning evals" = TUNE_EVALS,
@@ -236,19 +280,23 @@ with_run_finalizer({
   overview_dt <- dataset_overview(
     full_data_encoded,
     target = target_context$target,
-    feature_cols = setdiff(names(full_data_encoded), c(target_context$target, target_context$model_weight_col)),
+    feature_cols = setdiff(names(full_data_encoded), c(target_context$target, target_context$model_weight_col, target_context$model_offset_col)),
     id_cols = ID_COLS
   )
   safe_write_csv(overview_dt, file.path(OUTPUT_DIR, "xgb_dataset_overview.csv"))
 
-  learner <- lrn(
+  learner_args <- list(
     "regr.xgboost",
     predict_type = "response",
     booster = "gbtree",
-    objective = "reg:squarederror",
+    objective = XGB_OBJECTIVE,
     nthread = 1,
     seed = SEED
   )
+  if (!is.na(XGB_EVAL_METRIC)) {
+    learner_args$eval_metric <- XGB_EVAL_METRIC
+  }
+  learner <- do.call(lrn, learner_args)
 
   xgb_space_args <- list(
     nrounds = p_int(
@@ -291,6 +339,9 @@ with_run_finalizer({
       upper = config_value(CONFIG, c("xgboost", "search_space", "gamma"))[[2]]
     )
   }
+  if (has_config_value(CONFIG, c("xgboost", "search_space", "objective"))) {
+    xgb_space_args$objective <- p_fct(levels = config_value(CONFIG, c("xgboost", "search_space", "objective")))
+  }
 
   search_space <- do.call(ps, xgb_space_args)
 
@@ -321,7 +372,8 @@ with_run_finalizer({
     outer_block_values = outer_block_values,
     outer_block_col = OUTER_BLOCK_COL,
     target_context = target_context,
-    weight_col = target_context$model_weight_col
+    weight_col = target_context$model_weight_col,
+    offset_col = target_context$model_offset_col
   )
   predictions <- cv_run$predictions
   fold_metrics <- fold_metrics_from_predictions(predictions)
@@ -365,6 +417,9 @@ with_run_finalizer({
     if (!is.na(target_context$model_weight_col) && target_context$model_weight_col %in% names(full_data_encoded)) {
       final_task$set_col_roles(target_context$model_weight_col, roles = c("weights_learner", "weights_measure"))
     }
+    if (!is.na(target_context$model_offset_col) && target_context$model_offset_col %in% names(full_data_encoded)) {
+      final_task$set_col_roles(target_context$model_offset_col, roles = "offset")
+    }
     final_learner$train(final_task)
 
     importance_dt <- tryCatch(
@@ -390,8 +445,6 @@ with_run_finalizer({
     sprintf("- output_dir: `%s`", normalizePath(OUTPUT_DIR, mustWork = FALSE)),
     sprintf("- target: `%s`", TARGET),
     sprintf("- original_feature_cols: `%s`", paste(FEATURE_COLS, collapse = ", ")),
-    sprintf("- encoded_feature_count: `%s`", length(setdiff(names(full_data_encoded), c(target_context$target, target_context$model_weight_col)))),
-    "- feature_encoding: `one-hot encoding is learned separately inside each outer-CV training split`",
     sprintf("- seed: `%s`", SEED),
     sprintf("- outer_folds: `%s`", effective_outer_folds),
     sprintf("- inner_folds: `%s`", INNER_FOLDS),
@@ -402,6 +455,12 @@ with_run_finalizer({
     sprintf("- model_target: `%s`", target_context$target),
     sprintf("- target_denominator_col: `%s`", if (!is.na(target_context$target_denominator_col)) target_context$target_denominator_col else "<none>"),
     sprintf("- weight_col: `%s`", if (!is.na(target_context$weight_col)) target_context$weight_col else "<none>"),
+    sprintf("- xgb_objective: `%s`", XGB_OBJECTIVE),
+    sprintf("- xgb_eval_metric: `%s`", if (!is.na(XGB_EVAL_METRIC)) XGB_EVAL_METRIC else "<default>"),
+    sprintf("- xgb_exposure_col: `%s`", if (!is.na(XGB_EXPOSURE_COL)) XGB_EXPOSURE_COL else "<none>"),
+    sprintf("- xgb_offset_col: `%s`", if (!is.na(target_context$model_offset_col)) target_context$model_offset_col else "<none>"),
+    sprintf("- encoded_feature_count: `%s`", length(setdiff(names(full_data_encoded), c(target_context$target, target_context$model_weight_col, target_context$model_offset_col)))),
+    "- feature_encoding: `one-hot encoding is learned separately inside each outer-CV training split`",
     sprintf("- tune_evals: `%s`", TUNE_EVALS),
     sprintf("- tune_batch_size: `%s`", TUNE_BATCH_SIZE),
     sprintf("- effective_tune_batch_size: `%s`", EFFECTIVE_TUNE_BATCH_SIZE),

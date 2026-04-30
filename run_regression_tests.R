@@ -290,9 +290,9 @@ dir.create(rate_target_fixture_dir, recursive = TRUE, showWarnings = FALSE)
 
 rate_target_input <- file.path(rate_target_fixture_dir, "input.csv")
 rate_target_dt <- data.table(
-  count = c(2, 3, 5, 4, 6, 8, 3, 4, 7, 5, 9, 10),
-  feature_a = c(1, 2, 3, 2, 4, 5, 1, 3, 4, 2, 5, 6),
-  exposure = c(20, 30, 50, 40, 60, 80, 30, 40, 70, 50, 90, 100)
+  count = rep(c(2, 3, 5, 4, 6, 8, 3, 4, 7, 5, 9, 10), length.out = 60),
+  feature_a = rep(c(1, 2, 3, 2, 4, 5, 1, 3, 4, 2, 5, 6), length.out = 60),
+  exposure = rep(c(20, 30, 50, 40, 60, 80, 30, 40, 70, 50, 90, 100), length.out = 60)
 )
 safe_write_csv(rate_target_dt, rate_target_input)
 
@@ -366,6 +366,44 @@ tests[[length(tests) + 1L]] <- record_test(
     "XGBoost rate-target mode reports count-scale predictions, model-scale metrics, weights, and exposure baseline"
   } else {
     paste("XGBoost rate-target run did not produce expected outputs:", rate_xgb_run$output)
+  }
+)
+
+# ranger can train on log1p(count) while reporting predictions on count scale
+ranger_log1p_out <- file.path(rate_target_fixture_dir, "ranger_log1p_outputs")
+ranger_log1p_run <- run_script(
+  "mlr3_ranger_tuning.R",
+  args = c(
+    sprintf("--data=%s", rate_target_input),
+    sprintf("--output-dir=%s", ranger_log1p_out),
+    "--target=count",
+    "--features=feature_a",
+    "--ranger-target-transform=log1p",
+    "--folds=2",
+    "--inner-folds=2",
+    "--tune-evals=1",
+    "--workers=1"
+  )
+)
+ranger_log1p_predictions <- read_csv_if_exists(file.path(ranger_log1p_out, "ranger_cv_predictions.csv"))
+ranger_log1p_config_path <- file.path(ranger_log1p_out, "resolved_config.rds")
+ranger_log1p_config <- if (file.exists(ranger_log1p_config_path)) readRDS(ranger_log1p_config_path) else list()
+ranger_log1p_ok <- ranger_log1p_run$status == 0 &&
+  !is.null(ranger_log1p_predictions) &&
+  identical(ranger_log1p_config$ranger_target_transform, "log1p") &&
+  all(c("truth", "response", "model_truth", "model_response", "target_transform") %in% names(ranger_log1p_predictions)) &&
+  all(abs(ranger_log1p_predictions$truth - rate_target_dt$count[ranger_log1p_predictions$row_id]) < 1e-8) &&
+  all(abs(ranger_log1p_predictions$model_truth - log1p(rate_target_dt$count[ranger_log1p_predictions$row_id])) < 1e-8) &&
+  all(ranger_log1p_predictions$response >= 0) &&
+  all(ranger_log1p_predictions$target_transform == "log1p")
+
+tests[[length(tests) + 1L]] <- record_test(
+  "ranger_log1p_target_transform_reports_count_scale",
+  ranger_log1p_ok,
+  if (ranger_log1p_ok) {
+    "ranger target_transform=log1p trains on transformed counts and reports count-scale predictions"
+  } else {
+    paste("ranger log1p target-transform run did not produce expected outputs:", ranger_log1p_run$output)
   }
 )
 
@@ -647,6 +685,50 @@ tests[[length(tests) + 1L]] <- record_test(
     "mlr3_xgb_tuning.R runs factor features through fold-local one-hot encoding"
   } else {
     paste("mlr3_xgb_tuning.R did not complete factor-feature run:", xgb_factor_run$output)
+  }
+)
+
+# mlr3_xgb_tuning.R should use exposure as an offset, not as an encoded feature
+xgb_poisson_offset_out <- file.path(xgb_factor_fixture_dir, "poisson_offset_outputs")
+xgb_poisson_offset_run <- run_script(
+  "mlr3_xgb_tuning.R",
+  args = c(
+    sprintf("--data=%s", xgb_factor_input),
+    sprintf("--output-dir=%s", xgb_poisson_offset_out),
+    "--target=target",
+    "--features=region",
+    "--xgb-objective=count:poisson",
+    "--xgb-eval-metric=poisson-nloglik",
+    "--xgb-exposure-col=exposure",
+    "--folds=2",
+    "--inner-folds=2",
+    "--tune-evals=1",
+    "--workers=1"
+  )
+)
+xgb_poisson_offset_predictions <- read_csv_if_exists(file.path(xgb_poisson_offset_out, "xgb_cv_predictions.csv"))
+xgb_poisson_offset_overview <- read_csv_if_exists(file.path(xgb_poisson_offset_out, "xgb_dataset_overview.csv"))
+xgb_poisson_offset_report <- file.path(xgb_poisson_offset_out, "xgb_model_report.md")
+xgb_poisson_offset_report_text <- if (file.exists(xgb_poisson_offset_report)) {
+  paste(readLines(xgb_poisson_offset_report, warn = FALSE), collapse = "\n")
+} else {
+  ""
+}
+xgb_poisson_offset_ok <- xgb_poisson_offset_run$status == 0 &&
+  !is.null(xgb_poisson_offset_predictions) &&
+  !is.null(xgb_poisson_offset_overview) &&
+  nrow(xgb_poisson_offset_predictions) == 30 &&
+  !grepl("exposure", xgb_poisson_offset_overview$feature_list[[1]], fixed = TRUE) &&
+  grepl("xgb_exposure_col: `exposure`", xgb_poisson_offset_report_text, fixed = TRUE) &&
+  grepl("xgb_objective: `count:poisson`", xgb_poisson_offset_report_text, fixed = TRUE)
+
+tests[[length(tests) + 1L]] <- record_test(
+  "xgb_poisson_exposure_uses_offset_role",
+  xgb_poisson_offset_ok,
+  if (xgb_poisson_offset_ok) {
+    "mlr3_xgb_tuning.R runs Poisson count models with exposure held out of encoded features"
+  } else {
+    paste("mlr3_xgb_tuning.R did not complete Poisson exposure-offset run:", xgb_poisson_offset_run$output)
   }
 )
 

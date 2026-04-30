@@ -67,6 +67,15 @@ TARGET_DENOMINATOR_COL <- normalize_optional_string(get_setting(
   get_setting("target-denominator", "TARGET_DENOMINATOR", config_value_or(CONFIG, c("experiment", "target_denominator_col"), ""))
 ))
 WEIGHT_COL <- normalize_optional_string(get_setting("weight-col", "WEIGHT_COL", config_value_or(CONFIG, c("experiment", "weight_col"), "")))
+CONFIG_ONLY <- get_bool_setting("config-only", "CONFIG_ONLY", FALSE)
+RANGER_TARGET_TRANSFORM <- normalize_target_transform(get_setting(
+  "ranger-target-transform", "RANGER_TARGET_TRANSFORM",
+  config_value_or(CONFIG, c("ranger", "target_transform"), "none")
+))
+XGB_OBJECTIVE <- normalize_optional_string(get_setting("xgb-objective", "XGB_OBJECTIVE", config_value_or(CONFIG, c("xgboost", "objective"), "reg:squarederror")))
+if (is.na(XGB_OBJECTIVE)) XGB_OBJECTIVE <- "reg:squarederror"
+XGB_EVAL_METRIC <- normalize_optional_string(get_setting("xgb-eval-metric", "XGB_EVAL_METRIC", config_value_or(CONFIG, c("xgboost", "eval_metric"), "")))
+XGB_EXPOSURE_COL <- normalize_optional_string(get_setting("xgb-exposure-col", "XGB_EXPOSURE_COL", config_value_or(CONFIG, c("xgboost", "exposure_col"), "")))
 MISSING_DROP_WARN_FRACTION <- get_optional_numeric_setting(
   "missing-drop-warn-fraction", "MISSING_DROP_WARN_FRACTION",
   config_value_or(CONFIG, c("experiment", "missing_drop_warn_fraction"), 0.05),
@@ -137,6 +146,7 @@ write_validation_report <- function(output_dir, checks_dt, resolved_config, dict
     sprintf("- failed_checks: `%s`", n_failed),
     "",
     "## Run",
+    sprintf("- config_only: `%s`", resolved_config$config_only),
     sprintf("- data_path: `%s`", resolved_config$data_path),
     sprintf("- output_dir: `%s`", resolved_config$output_dir),
     sprintf("- target: `%s`", resolved_config$target),
@@ -149,8 +159,12 @@ write_validation_report <- function(output_dir, checks_dt, resolved_config, dict
     sprintf("- outer_resampling: `%s`", resolved_config$outer_resampling),
     sprintf("- outer_block_col: `%s`", if (!is.na(resolved_config$outer_block_col)) resolved_config$outer_block_col else "<none>"),
     sprintf("- target_mode: `%s`", resolved_config$target_mode),
+    sprintf("- ranger_target_transform: `%s`", resolved_config$ranger_target_transform),
     sprintf("- target_denominator_col: `%s`", if (!is.na(resolved_config$target_denominator_col)) resolved_config$target_denominator_col else "<none>"),
     sprintf("- weight_col: `%s`", if (!is.na(resolved_config$weight_col)) resolved_config$weight_col else "<none>"),
+    sprintf("- xgb_objective: `%s`", resolved_config$xgb_objective),
+    sprintf("- xgb_eval_metric: `%s`", if (!is.na(resolved_config$xgb_eval_metric)) resolved_config$xgb_eval_metric else "<default>"),
+    sprintf("- xgb_exposure_col: `%s`", if (!is.na(resolved_config$xgb_exposure_col)) resolved_config$xgb_exposure_col else "<none>"),
     sprintf("- missing_drop_warn_fraction: `%s`", if (is.na(resolved_config$missing_drop_warn_fraction)) "<disabled>" else resolved_config$missing_drop_warn_fraction),
     "",
     "## Checks",
@@ -212,6 +226,100 @@ check_output_dir_writable <- function(path) {
   isTRUE(ok)
 }
 
+effective_configuration_checks <- function() {
+  checks <- list()
+
+  checks[[length(checks) + 1L]] <- record_check(
+    "feature_cols_nonempty",
+    length(FEATURE_COLS) > 0,
+    if (length(FEATURE_COLS) > 0) paste(FEATURE_COLS, collapse = ", ") else "feature_cols must contain at least one predictor"
+  )
+
+  checks[[length(checks) + 1L]] <- record_check(
+    "target_not_in_feature_cols",
+    !(TARGET %in% FEATURE_COLS),
+    sprintf("target=%s, feature_cols=%s", TARGET, paste(FEATURE_COLS, collapse = ", "))
+  )
+
+  feature_id_overlap <- intersect(FEATURE_COLS, ID_COLS)
+  checks[[length(checks) + 1L]] <- record_check(
+    "feature_cols_do_not_overlap_id_cols",
+    length(feature_id_overlap) == 0,
+    if (length(feature_id_overlap) == 0) "no overlap" else paste("overlap:", paste(feature_id_overlap, collapse = ", "))
+  )
+
+  checks[[length(checks) + 1L]] <- record_check(
+    "inner_folds_not_greater_than_outer_folds",
+    !identical(OUTER_RESAMPLING, "stratified") || INNER_FOLDS <= N_FOLDS,
+    sprintf("inner_folds=%s, n_folds=%s, outer_resampling=%s", INNER_FOLDS, N_FOLDS, OUTER_RESAMPLING)
+  )
+
+  checks[[length(checks) + 1L]] <- record_check(
+    "outer_block_col_not_target",
+    !identical(OUTER_RESAMPLING, "year_blocked") || !identical(OUTER_BLOCK_COL, TARGET),
+    sprintf("outer_resampling=%s, outer_block_col=%s, target=%s", OUTER_RESAMPLING, if (!is.na(OUTER_BLOCK_COL)) OUTER_BLOCK_COL else "<none>", TARGET)
+  )
+
+  checks[[length(checks) + 1L]] <- record_check(
+    "rate_target_denominator_config",
+    !identical(TARGET_MODE, "rate") || (!is.na(TARGET_DENOMINATOR_COL) && !identical(TARGET_DENOMINATOR_COL, TARGET)),
+    sprintf("target_mode=%s, target_denominator_col=%s, target=%s", TARGET_MODE, if (!is.na(TARGET_DENOMINATOR_COL)) TARGET_DENOMINATOR_COL else "<none>", TARGET)
+  )
+
+  checks[[length(checks) + 1L]] <- record_check(
+    "weight_col_not_target",
+    is.na(WEIGHT_COL) || !identical(WEIGHT_COL, TARGET),
+    sprintf("weight_col=%s, target=%s", if (!is.na(WEIGHT_COL)) WEIGHT_COL else "<none>", TARGET)
+  )
+
+  checks[[length(checks) + 1L]] <- record_check(
+    "ranger_target_transform_valid",
+    RANGER_TARGET_TRANSFORM %in% c("none", "log1p"),
+    RANGER_TARGET_TRANSFORM
+  )
+
+  checks[[length(checks) + 1L]] <- record_check(
+    "xgboost_objective_config",
+    !is.na(XGB_OBJECTIVE) && nzchar(XGB_OBJECTIVE),
+    XGB_OBJECTIVE
+  )
+
+  xgb_objective_space_ok <- TRUE
+  xgb_objective_space_detail <- "<not tuned>"
+  if (has_config_value(CONFIG, c("xgboost", "search_space", "objective"))) {
+    objective_levels <- unique(as.character(config_value(CONFIG, c("xgboost", "search_space", "objective"))))
+    xgb_objective_space_detail <- paste(objective_levels, collapse = ", ")
+    xgb_objective_space_ok <- length(objective_levels) > 0
+    if (!is.na(XGB_EXPOSURE_COL)) {
+      xgb_objective_space_ok <- identical(objective_levels, "count:poisson")
+      xgb_objective_space_detail <- paste0(xgb_objective_space_detail, " (must be only count:poisson when xgboost.exposure_col is set)")
+    }
+  }
+  checks[[length(checks) + 1L]] <- record_check(
+    "xgboost_search_space_objective_config",
+    xgb_objective_space_ok,
+    xgb_objective_space_detail
+  )
+
+  checks[[length(checks) + 1L]] <- record_check(
+    "xgboost_exposure_col_config",
+    is.na(XGB_EXPOSURE_COL) ||
+      (!identical(XGB_EXPOSURE_COL, TARGET) &&
+        !(XGB_EXPOSURE_COL %in% FEATURE_COLS) &&
+        identical(TARGET_MODE, "count") &&
+        identical(XGB_OBJECTIVE, "count:poisson")),
+    paste(
+      sprintf("xgb_exposure_col=%s", if (!is.na(XGB_EXPOSURE_COL)) XGB_EXPOSURE_COL else "<none>"),
+      sprintf("target_mode=%s", TARGET_MODE),
+      sprintf("xgb_objective=%s", XGB_OBJECTIVE),
+      sprintf("feature_cols=%s", paste(FEATURE_COLS, collapse = ", ")),
+      sep = "; "
+    )
+  )
+
+  checks
+}
+
 validate_zero_formula_rhs <- function(rhs, dt) {
   rhs_formula <- as.formula(sprintf("~ %s", rhs))
   missing_vars <- setdiff(all.vars(rhs_formula), names(dt))
@@ -229,6 +337,7 @@ with_run_finalizer({
   resolved_config <- list(
     script_name = SCRIPT_NAME,
     run_name = RUN_NAME,
+    config_only = CONFIG_ONLY,
     data_path = normalizePath(DATA_PATH, mustWork = FALSE),
     output_dir = normalizePath(OUTPUT_DIR, mustWork = FALSE),
     target = TARGET,
@@ -241,13 +350,41 @@ with_run_finalizer({
     outer_resampling = OUTER_RESAMPLING,
     outer_block_col = if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else NA_character_,
     target_mode = TARGET_MODE,
+    ranger_target_transform = RANGER_TARGET_TRANSFORM,
     target_denominator_col = if (identical(TARGET_MODE, "rate")) TARGET_DENOMINATOR_COL else NA_character_,
     weight_col = WEIGHT_COL,
+    xgb_objective = XGB_OBJECTIVE,
+    xgb_eval_metric = XGB_EVAL_METRIC,
+    xgb_exposure_col = XGB_EXPOSURE_COL,
     missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
   )
   write_config_snapshot(OUTPUT_DIR, resolved_config)
   checks <- list()
   validation_dictionary <- NULL
+
+  finalize_checks <- function(checks, dictionary_dt = NULL) {
+    checks_dt <- rbindlist(checks, fill = TRUE)
+    safe_write_csv(checks_dt, file.path(OUTPUT_DIR, "validation_checks.csv"))
+    write_validation_report(OUTPUT_DIR, checks_dt, resolved_config, dictionary_dt = dictionary_dt)
+
+    failed_checks <- checks_dt[ok == FALSE]
+    if (nrow(failed_checks) > 0) {
+      for (i in seq_len(nrow(failed_checks))) {
+        log_info("Validation failed: ", failed_checks$check[[i]], " - ", failed_checks$details[[i]])
+      }
+      stop("Repository validation failed. See validation_checks.csv for details.", call. = FALSE)
+    }
+    invisible(checks_dt)
+  }
+
+  checks <- c(checks, effective_configuration_checks())
+  config_checks_dt <- rbindlist(checks, fill = TRUE)
+
+  if (CONFIG_ONLY || any(config_checks_dt$ok == FALSE)) {
+    finalize_checks(checks)
+    log_info("Configuration preflight completed successfully.")
+    .script_ok <- TRUE
+  } else {
 
   missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
   checks[[length(checks) + 1L]] <- record_check(
@@ -266,12 +403,6 @@ with_run_finalizer({
     "validation_output_dir_writable",
     check_output_dir_writable(OUTPUT_DIR),
     normalizePath(OUTPUT_DIR, mustWork = FALSE)
-  )
-
-  checks[[length(checks) + 1L]] <- record_check(
-    "inner_folds_not_greater_than_outer_folds",
-    !identical(OUTER_RESAMPLING, "stratified") || INNER_FOLDS <= N_FOLDS,
-    sprintf("inner_folds=%s, n_folds=%s, outer_resampling=%s", INNER_FOLDS, N_FOLDS, OUTER_RESAMPLING)
   )
 
   dataset_check <- tryCatch({
@@ -366,20 +497,11 @@ with_run_finalizer({
   })
 
   checks <- c(checks, dataset_check)
-  checks_dt <- rbindlist(checks, fill = TRUE)
-  safe_write_csv(checks_dt, file.path(OUTPUT_DIR, "validation_checks.csv"))
-  write_validation_report(OUTPUT_DIR, checks_dt, resolved_config, dictionary_dt = validation_dictionary)
-
-  failed_checks <- checks_dt[ok == FALSE]
-  if (nrow(failed_checks) > 0) {
-    for (i in seq_len(nrow(failed_checks))) {
-      log_info("Validation failed: ", failed_checks$check[[i]], " - ", failed_checks$details[[i]])
-    }
-    stop("Repository validation failed. See validation_checks.csv for details.", call. = FALSE)
-  }
+  finalize_checks(checks, dictionary_dt = validation_dictionary)
 
   log_info("Repository validation completed successfully.")
   .script_ok <- TRUE
+  }
 }, function() finalize_run(
   log_state = LOG_STATE,
   output_dir = OUTPUT_DIR,

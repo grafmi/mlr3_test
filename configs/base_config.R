@@ -100,6 +100,10 @@ CONFIG <- list(
   ranger = list(
     output_dir = "outputs_ranger",
     tune_evals = 10L,
+    # Optional target transform for count-like outcomes. "log1p" trains ranger
+    # on log1p(target) or log1p(rate) and writes predictions back on the
+    # original count scale for comparison outputs.
+    target_transform = "none",
     # Number of random-search configurations evaluated per tuning batch.
     # Higher values can better utilize many workers: roughly
     # tune_batch_size * inner_folds jobs can be active during tuning.
@@ -130,6 +134,16 @@ CONFIG <- list(
   xgboost = list(
     output_dir = "outputs_xgb",
     tune_evals = 10L,
+    # Base XGBoost objective. For a Poisson count model with exposure offset,
+    # set this to "count:poisson" and set exposure_col below.
+    objective = "reg:squarederror",
+    # Optional XGBoost eval_metric passed to the learner, for example
+    # "poisson-nloglik" with objective = "count:poisson".
+    eval_metric = "",
+    # Optional exposure column for Poisson count models. When set, XGBoost uses
+    # log(exposure_col) as an offset/base margin and the column must not also
+    # be listed in CONFIG$experiment$feature_cols.
+    exposure_col = "",
     # Number of random-search configurations evaluated per tuning batch.
     # Higher values can better utilize many workers while keeping xgboost
     # model-level threads at 1.

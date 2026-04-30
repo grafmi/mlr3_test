@@ -183,7 +183,8 @@ columns that are present in the dataset but are not modeled as predictors.
 For `CONFIG$ranger$search_space` and `CONFIG$xgboost$search_space`, supported
 optional parameters can also be removed or commented out. If a known optional
 entry is missing in the selected config file, that parameter is simply not
-tuned in the corresponding script.
+tuned in the corresponding script. XGBoost also supports `objective` as a
+categorical search-space entry when no exposure offset is configured.
 
 If you want to run a named variant, pass `--config=/path/to/configs/my_variant.R`
 or set `CONFIG_PATH=/path/to/configs/my_variant.R`. Variant config files should
@@ -408,6 +409,30 @@ The direct model-scale values are written as `model_truth`, `model_response`,
 `*_model_scale_*_metrics.csv`, and optional exposure-baseline outputs when a
 rate denominator is configured.
 
+For count-like targets with a long right tail, ranger can additionally train on
+a transformed target. Set `CONFIG$ranger$target_transform = "log1p"` to train
+on `log1p(target)` in count mode or `log1p(target / denominator)` in rate mode.
+The main prediction and metric files are still back-transformed to the original
+count scale, while `model_truth` and `model_response` keep the transformed
+model scale.
+
+For an XGBoost Poisson count model with an exposure offset, keep
+`CONFIG$experiment$target_mode = "count"`, set `CONFIG$xgboost$objective =
+"count:poisson"`, optionally set `CONFIG$xgboost$eval_metric =
+"poisson-nloglik"`, and set `CONFIG$xgboost$exposure_col` to the exposure
+column, for example `potenzielle_kunden`. The script uses
+`log(exposure_col)` as the mlr3 offset/base margin in every inner and outer CV
+split. The exposure column must be removed from
+`CONFIG$experiment$feature_cols` so it is not also used as a normal predictor.
+
+```r
+CONFIG$experiment$target_mode <- "count"
+CONFIG$experiment$feature_cols <- c("prcrank", "unfalldeckung")
+CONFIG$xgboost$objective <- "count:poisson"
+CONFIG$xgboost$eval_metric <- "poisson-nloglik"
+CONFIG$xgboost$exposure_col <- "potenzielle_kunden"
+```
+
 As a practical rule of thumb:
 
 - start with the physical CPU core count, not the number of hardware threads
@@ -493,9 +518,10 @@ For repeated mlr3 runs, `*_cv_predictions.csv`, `*_fold_metrics.csv`, and
 `*_overall_metrics.csv` files keep the same schema so downstream comparison
 scripts remain compatible.
 For rate-target mlr3 runs, `*_cv_predictions.csv` additionally includes
-`model_truth`, `model_response`, `denominator`, `weight`, and
-`postprocessed_response`; count-scale metrics remain in `*_overall_metrics.csv`,
-while direct model-scale metrics are written to
+`model_truth`, `model_response`, `model_truth_untransformed`,
+`model_response_untransformed`, `target_transform`, `denominator`, `weight`,
+and `postprocessed_response`; count-scale metrics remain in
+`*_overall_metrics.csv`, while direct model-scale metrics are written to
 `*_model_scale_overall_metrics.csv` and `*_model_scale_fold_metrics.csv`.
 Exposure-baseline files are written as `*_exposure_baseline_*` when
 `target_mode = "rate"`.

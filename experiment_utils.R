@@ -194,6 +194,33 @@ normalize_target_mode <- function(value) {
   stop("target_mode must be 'count' or 'rate'.", call. = FALSE)
 }
 
+normalize_target_transform <- function(value) {
+  value <- tolower(trimws(as.character(value)[1]))
+  value <- gsub("-", "_", value, fixed = TRUE)
+  if (is.na(value) || !nzchar(value) || value %in% c("none", "identity", "raw", "default")) return("none")
+  if (value %in% c("log1p", "log_plus_one", "log")) return("log1p")
+  stop("target_transform must be 'none' or 'log1p'.", call. = FALSE)
+}
+
+apply_target_transform <- function(values, transform, context = "target") {
+  transform <- normalize_target_transform(transform)
+  if (identical(transform, "none")) return(values)
+  if (identical(transform, "log1p")) {
+    if (anyNA(values) || any(!is.finite(values)) || any(values < 0)) {
+      stop(context, " must contain only finite values >= 0 when target_transform='log1p'.", call. = FALSE)
+    }
+    return(log1p(values))
+  }
+  stop("Unsupported target_transform: ", transform, call. = FALSE)
+}
+
+inverse_target_transform <- function(values, transform) {
+  transform <- normalize_target_transform(transform)
+  if (identical(transform, "none")) return(values)
+  if (identical(transform, "log1p")) return(pmax(expm1(values), 0))
+  stop("Unsupported target_transform: ", transform, call. = FALSE)
+}
+
 coerce_character_columns_to_factor <- function(dt, exclude_cols = character(0)) {
   out <- data.table::copy(dt)
   candidate_cols <- setdiff(names(out), exclude_cols)
@@ -788,11 +815,16 @@ make_target_context <- function(dt, target, feature_cols,
                                 target_mode = "count",
                                 target_denominator_col = NA_character_,
                                 weight_col = NA_character_,
+                                target_transform = "none",
+                                offset_col = NA_character_,
                                 model_target_col = ".model_target",
-                                model_weight_col = ".weight") {
+                                model_weight_col = ".weight",
+                                model_offset_col = ".offset") {
   target_mode <- normalize_target_mode(target_mode)
   target_denominator_col <- normalize_optional_string(target_denominator_col)
   weight_col <- normalize_optional_string(weight_col)
+  target_transform <- normalize_target_transform(target_transform)
+  offset_col <- normalize_optional_string(offset_col)
   dt <- data.table::as.data.table(data.table::copy(dt))
 
   if (!target %in% names(dt)) {
@@ -817,13 +849,14 @@ make_target_context <- function(dt, target, feature_cols,
     if (anyNA(denominator) || any(!is.finite(denominator)) || any(denominator <= 0)) {
       stop("Target denominator column must contain only finite values > 0: ", target_denominator_col, call. = FALSE)
     }
-    model_target <- dt[[target]] / denominator
-    if (anyNA(model_target) || any(!is.finite(model_target))) {
+    raw_model_target <- dt[[target]] / denominator
+    if (anyNA(raw_model_target) || any(!is.finite(raw_model_target))) {
       stop("Rate target contains non-finite values after dividing by ", target_denominator_col, ".", call. = FALSE)
     }
   } else {
-    model_target <- dt[[target]]
+    raw_model_target <- dt[[target]]
   }
+  model_target <- apply_target_transform(raw_model_target, target_transform, context = "Model target")
 
   weights <- rep(NA_real_, nrow(dt))
   if (!is.na(weight_col)) {
@@ -836,6 +869,20 @@ make_target_context <- function(dt, target, feature_cols,
     }
     if (anyNA(weights) || any(!is.finite(weights)) || any(weights <= 0)) {
       stop("Weight column must contain only finite values > 0: ", weight_col, call. = FALSE)
+    }
+  }
+
+  offset <- rep(NA_real_, nrow(dt))
+  if (!is.na(offset_col)) {
+    if (!offset_col %in% names(dt)) {
+      stop("Offset column not found in modeling data: ", offset_col, call. = FALSE)
+    }
+    offset <- dt[[offset_col]]
+    if (!is.numeric(offset)) {
+      stop("Offset column must be numeric: ", offset_col, call. = FALSE)
+    }
+    if (anyNA(offset) || any(!is.finite(offset))) {
+      stop("Offset column must contain only finite values: ", offset_col, call. = FALSE)
     }
   }
 
@@ -853,6 +900,9 @@ make_target_context <- function(dt, target, feature_cols,
   if (!is.na(weight_col)) {
     model_dt[, (model_weight_col) := weights]
   }
+  if (!is.na(offset_col)) {
+    model_dt[, (model_offset_col) := offset]
+  }
 
   list(
     data = model_dt,
@@ -860,12 +910,17 @@ make_target_context <- function(dt, target, feature_cols,
     original_target = target,
     feature_cols = feature_cols,
     target_mode = target_mode,
+    target_transform = target_transform,
     target_denominator_col = if (identical(target_mode, "rate")) target_denominator_col else NA_character_,
     weight_col = weight_col,
+    offset_col = offset_col,
     model_weight_col = if (!is.na(weight_col)) model_weight_col else NA_character_,
+    model_offset_col = if (!is.na(offset_col)) model_offset_col else NA_character_,
     original_truth = as.numeric(dt[[target]]),
+    model_truth_untransformed = as.numeric(raw_model_target),
     denominator = as.numeric(denominator),
-    weights = as.numeric(weights)
+    weights = as.numeric(weights),
+    offset = as.numeric(offset)
   )
 }
 
@@ -879,10 +934,12 @@ postprocess_prediction_dt <- function(pred_dt, target_context) {
   original_truth_values <- target_context$original_truth[row_ids]
   denominator <- target_context$denominator[row_ids]
   weights <- target_context$weights[row_ids]
+  model_truth_untransformed <- inverse_target_transform(model_truth, target_context$target_transform)
+  model_response_untransformed <- inverse_target_transform(model_response, target_context$target_transform)
   response_values <- if (identical(target_context$target_mode, "rate")) {
-    model_response * denominator
+    model_response_untransformed * denominator
   } else {
-    model_response
+    model_response_untransformed
   }
 
   out[, truth := original_truth_values]
@@ -894,8 +951,13 @@ postprocess_prediction_dt <- function(pred_dt, target_context) {
   out[, model_response := model_response]
   out[, model_error := model_response - model_truth]
   out[, model_abs_error := abs(model_response - model_truth)]
+  out[, model_truth_untransformed := model_truth_untransformed]
+  out[, model_response_untransformed := model_response_untransformed]
+  out[, model_untransformed_error := model_response_untransformed - model_truth_untransformed]
+  out[, model_untransformed_abs_error := abs(model_response_untransformed - model_truth_untransformed)]
   out[, denominator := if (identical(target_context$target_mode, "rate")) denominator else NA_real_]
   out[, weight := if (!is.na(target_context$weight_col)) weights else NA_real_]
+  out[, target_transform := target_context$target_transform]
   out[, postprocessed_response := response_values]
 
   leading <- c("repeat", "row_id", "fold", "target_mode", "truth", "response", "error", "abs_error")
@@ -1021,7 +1083,7 @@ add_regression_stratum <- function(backend, target, n_bins = 10, col_name = ".ta
   backend
 }
 
-make_regr_task <- function(id, backend, target, stratum_col = ".target_stratum", weight_col = NULL) {
+make_regr_task <- function(id, backend, target, stratum_col = ".target_stratum", weight_col = NULL, offset_col = NULL) {
   task <- mlr3::TaskRegr$new(id = id, backend = as.data.frame(backend), target = target)
   if (stratum_col %in% names(backend)) {
     task$set_col_roles(stratum_col, roles = "stratum")
@@ -1029,13 +1091,20 @@ make_regr_task <- function(id, backend, target, stratum_col = ".target_stratum",
   if (!is.null(weight_col) && !is.na(weight_col) && nzchar(weight_col) && weight_col %in% names(backend)) {
     task$set_col_roles(weight_col, roles = c("weights_learner", "weights_measure"))
   }
+  if (!is.null(offset_col) && !is.na(offset_col) && nzchar(offset_col) && offset_col %in% names(backend)) {
+    task$set_col_roles(offset_col, roles = "offset")
+  }
   task
 }
 
-encode_features_train_test <- function(train_dt, test_dt, target, unseen_level = ".__unseen__", weight_col = NULL) {
+encode_features_train_test <- function(train_dt, test_dt, target, unseen_level = ".__unseen__", weight_col = NULL, offset_col = NULL) {
   train_encoded_source <- data.table::as.data.table(data.table::copy(train_dt))
   test_encoded_source <- data.table::as.data.table(data.table::copy(test_dt))
-  excluded_cols <- c(target, if (!is.null(weight_col) && !is.na(weight_col) && nzchar(weight_col)) weight_col else character(0))
+  excluded_cols <- c(
+    target,
+    if (!is.null(weight_col) && !is.na(weight_col) && nzchar(weight_col)) weight_col else character(0),
+    if (!is.null(offset_col) && !is.na(offset_col) && nzchar(offset_col)) offset_col else character(0)
+  )
   feature_cols <- setdiff(names(train_encoded_source), excluded_cols)
   if (length(feature_cols) == 0) {
     stop("At least one predictor is required for feature encoding.", call. = FALSE)
@@ -1086,6 +1155,10 @@ encode_features_train_test <- function(train_dt, test_dt, target, unseen_level =
   if (!is.null(weight_col) && !is.na(weight_col) && nzchar(weight_col) && weight_col %in% names(train_encoded_source)) {
     encoded_train[, (weight_col) := train_encoded_source[[weight_col]]]
     encoded_test[, (weight_col) := test_encoded_source[[weight_col]]]
+  }
+  if (!is.null(offset_col) && !is.na(offset_col) && nzchar(offset_col) && offset_col %in% names(train_encoded_source)) {
+    encoded_train[, (offset_col) := train_encoded_source[[offset_col]]]
+    encoded_test[, (offset_col) := test_encoded_source[[offset_col]]]
   }
   unseen_dt <- data.table::rbindlist(unseen_rows, fill = TRUE)
 
@@ -1308,7 +1381,8 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
                                                     outer_block_values = NULL,
                                                     outer_block_col = NULL,
                                                     target_context = NULL,
-                                                    weight_col = NULL) {
+                                                    weight_col = NULL,
+                                                    offset_col = NULL) {
   if (outer_repeats < 1L) {
     stop("outer_repeats must be at least 1.", call. = FALSE)
   }
@@ -1366,7 +1440,13 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
         ", test rows=", length(test_ids)
       )
 
-      encoded <- encode_features_train_test(raw_dt[train_ids], raw_dt[test_ids], target = target, weight_col = weight_col)
+      encoded <- encode_features_train_test(
+        raw_dt[train_ids],
+        raw_dt[test_ids],
+        target = target,
+        weight_col = weight_col,
+        offset_col = offset_col
+      )
       train_task <- mlr3::TaskRegr$new(
         id = sprintf("%s_train_r%s_f%s", task_id, repeat_idx, fold),
         backend = as.data.frame(encoded$train),
@@ -1380,6 +1460,10 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
       if (!is.null(weight_col) && !is.na(weight_col) && nzchar(weight_col) && weight_col %in% names(encoded$train)) {
         train_task$set_col_roles(weight_col, roles = c("weights_learner", "weights_measure"))
         test_task$set_col_roles(weight_col, roles = c("weights_learner", "weights_measure"))
+      }
+      if (!is.null(offset_col) && !is.na(offset_col) && nzchar(offset_col) && offset_col %in% names(encoded$train)) {
+        train_task$set_col_roles(offset_col, roles = "offset")
+        test_task$set_col_roles(offset_col, roles = "offset")
       }
 
       at_fold <- auto_tuner$clone(deep = TRUE)

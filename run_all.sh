@@ -143,11 +143,6 @@ write_text_file(file.path(output_dir, "README.txt"), "ZINB step skipped because 
 RS
 }
 
-if [[ ! -f "$MLR3_DATA_PATH" ]]; then
-  echo "Error: Data file not found: $MLR3_DATA_PATH" >&2
-  exit 1
-fi
-
 export RANGER_OUTPUT_DIR
 export XGB_OUTPUT_DIR
 export ZINB_OUTPUT_DIR
@@ -159,6 +154,13 @@ export RUN_SUMMARY_OUTPUT_DIR
 export CONFIG_PATH
 export RUN_NAME
 export RUN_ZINB
+
+run_step "Checking run configuration" Rscript "$SCRIPT_DIR/validate_repo.R" --config-only=true
+
+if [[ ! -f "$MLR3_DATA_PATH" ]]; then
+  echo "Error: Data file not found: $MLR3_DATA_PATH" >&2
+  exit 1
+fi
 
 echo "Repository directory: $SCRIPT_DIR"
 echo "Config file: $CONFIG_PATH"
