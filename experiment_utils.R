@@ -186,6 +186,14 @@ normalize_outer_resampling <- function(value) {
   stop("outer_resampling must be 'stratified' or 'year_blocked'.", call. = FALSE)
 }
 
+normalize_target_mode <- function(value) {
+  value <- tolower(trimws(as.character(value)[1]))
+  value <- gsub("-", "_", value, fixed = TRUE)
+  if (value %in% c("count", "raw", "default")) return("count")
+  if (value %in% c("rate", "exposure_rate")) return("rate")
+  stop("target_mode must be 'count' or 'rate'.", call. = FALSE)
+}
+
 coerce_character_columns_to_factor <- function(dt, exclude_cols = character(0)) {
   out <- data.table::copy(dt)
   candidate_cols <- setdiff(names(out), exclude_cols)
@@ -749,6 +757,12 @@ poisson_deviance_score <- function(truth, mean_pred) {
   mean(2 * (term - (y - mu)), na.rm = TRUE)
 }
 
+wape_score <- function(truth, response) {
+  denom <- sum(abs(truth), na.rm = TRUE)
+  if (!is.finite(denom) || denom <= 0) return(NA_real_)
+  sum(abs(response - truth), na.rm = TRUE) / denom
+}
+
 reg_metrics <- function(truth, response, negloglik = NULL) {
   err <- response - truth
   sse <- sum(err^2, na.rm = TRUE)
@@ -764,9 +778,188 @@ reg_metrics <- function(truth, response, negloglik = NULL) {
     mse = mean(err^2, na.rm = TRUE),
     bias = mean(err, na.rm = TRUE),
     r2 = if (isTRUE(all.equal(sst, 0))) NA_real_ else 1 - sse / sst,
+    wape = wape_score(truth, response),
     poisson_deviance = poisson_deviance,
     negloglik = mean_negloglik
   )
+}
+
+make_target_context <- function(dt, target, feature_cols,
+                                target_mode = "count",
+                                target_denominator_col = NA_character_,
+                                weight_col = NA_character_,
+                                model_target_col = ".model_target",
+                                model_weight_col = ".weight") {
+  target_mode <- normalize_target_mode(target_mode)
+  target_denominator_col <- normalize_optional_string(target_denominator_col)
+  weight_col <- normalize_optional_string(weight_col)
+  dt <- data.table::as.data.table(data.table::copy(dt))
+
+  if (!target %in% names(dt)) {
+    stop("Target column not found in modeling data: ", target, call. = FALSE)
+  }
+  if (!is.numeric(dt[[target]])) {
+    stop("Target column must be numeric: ", target, call. = FALSE)
+  }
+
+  denominator <- rep(NA_real_, nrow(dt))
+  if (identical(target_mode, "rate")) {
+    if (is.na(target_denominator_col)) {
+      stop("target_denominator_col is required when target_mode='rate'.", call. = FALSE)
+    }
+    if (!target_denominator_col %in% names(dt)) {
+      stop("Target denominator column not found in modeling data: ", target_denominator_col, call. = FALSE)
+    }
+    denominator <- dt[[target_denominator_col]]
+    if (!is.numeric(denominator)) {
+      stop("Target denominator column must be numeric: ", target_denominator_col, call. = FALSE)
+    }
+    if (anyNA(denominator) || any(!is.finite(denominator)) || any(denominator <= 0)) {
+      stop("Target denominator column must contain only finite values > 0: ", target_denominator_col, call. = FALSE)
+    }
+    model_target <- dt[[target]] / denominator
+    if (anyNA(model_target) || any(!is.finite(model_target))) {
+      stop("Rate target contains non-finite values after dividing by ", target_denominator_col, ".", call. = FALSE)
+    }
+  } else {
+    model_target <- dt[[target]]
+  }
+
+  weights <- rep(NA_real_, nrow(dt))
+  if (!is.na(weight_col)) {
+    if (!weight_col %in% names(dt)) {
+      stop("Weight column not found in modeling data: ", weight_col, call. = FALSE)
+    }
+    weights <- dt[[weight_col]]
+    if (!is.numeric(weights)) {
+      stop("Weight column must be numeric: ", weight_col, call. = FALSE)
+    }
+    if (anyNA(weights) || any(!is.finite(weights)) || any(weights <= 0)) {
+      stop("Weight column must contain only finite values > 0: ", weight_col, call. = FALSE)
+    }
+  }
+
+  feature_cols <- unique(feature_cols)
+  missing_features <- setdiff(feature_cols, names(dt))
+  if (length(missing_features) > 0) {
+    stop("Feature column(s) missing after target setup: ", paste(missing_features, collapse = ", "), call. = FALSE)
+  }
+
+  model_dt <- data.table::data.table(.model_target_tmp = model_target)
+  data.table::setnames(model_dt, ".model_target_tmp", model_target_col)
+  if (length(feature_cols) > 0) {
+    model_dt <- data.table::data.table(model_dt, dt[, ..feature_cols])
+  }
+  if (!is.na(weight_col)) {
+    model_dt[, (model_weight_col) := weights]
+  }
+
+  list(
+    data = model_dt,
+    target = model_target_col,
+    original_target = target,
+    feature_cols = feature_cols,
+    target_mode = target_mode,
+    target_denominator_col = if (identical(target_mode, "rate")) target_denominator_col else NA_character_,
+    weight_col = weight_col,
+    model_weight_col = if (!is.na(weight_col)) model_weight_col else NA_character_,
+    original_truth = as.numeric(dt[[target]]),
+    denominator = as.numeric(denominator),
+    weights = as.numeric(weights)
+  )
+}
+
+postprocess_prediction_dt <- function(pred_dt, target_context) {
+  if (is.null(target_context)) return(pred_dt)
+
+  out <- data.table::as.data.table(data.table::copy(pred_dt))
+  row_ids <- out$row_id
+  model_truth <- out$truth
+  model_response <- out$response
+  original_truth_values <- target_context$original_truth[row_ids]
+  denominator <- target_context$denominator[row_ids]
+  weights <- target_context$weights[row_ids]
+  response_values <- if (identical(target_context$target_mode, "rate")) {
+    model_response * denominator
+  } else {
+    model_response
+  }
+
+  out[, truth := original_truth_values]
+  out[, response := response_values]
+  out[, error := response_values - original_truth_values]
+  out[, abs_error := abs(response_values - original_truth_values)]
+  out[, target_mode := target_context$target_mode]
+  out[, model_truth := model_truth]
+  out[, model_response := model_response]
+  out[, model_error := model_response - model_truth]
+  out[, model_abs_error := abs(model_response - model_truth)]
+  out[, denominator := if (identical(target_context$target_mode, "rate")) denominator else NA_real_]
+  out[, weight := if (!is.na(target_context$weight_col)) weights else NA_real_]
+  out[, postprocessed_response := response_values]
+
+  leading <- c("repeat", "row_id", "fold", "target_mode", "truth", "response", "error", "abs_error")
+  data.table::setcolorder(out, c(intersect(leading, names(out)), setdiff(names(out), leading)))
+  out
+}
+
+model_scale_fold_metrics_from_predictions <- function(predictions) {
+  if (!all(c("model_truth", "model_response") %in% names(predictions))) {
+    return(fold_metrics_from_predictions(predictions))
+  }
+  by_cols <- if ("repeat" %in% names(predictions)) c("repeat", "fold") else "fold"
+  out <- predictions[, reg_metrics(model_truth, model_response), by = by_cols]
+  if ("repeat" %in% names(out)) {
+    data.table::setorderv(out, c("repeat", "fold"))
+  } else {
+    data.table::setorder(out, fold)
+  }
+  out
+}
+
+model_scale_aggregate_predictions <- function(predictions) {
+  if (!all(c("model_truth", "model_response") %in% names(predictions))) {
+    return(aggregate_predictions(predictions))
+  }
+  reg_metrics(predictions$model_truth, predictions$model_response)
+}
+
+exposure_baseline_predictions_from_fold_ids <- function(fold_ids, target_context, repeat_id = NULL) {
+  if (is.null(target_context) || !identical(target_context$target_mode, "rate")) {
+    return(data.table::data.table())
+  }
+  if (anyNA(fold_ids) || length(fold_ids) != length(target_context$original_truth)) {
+    stop("Fold IDs must align with target context for exposure baseline.", call. = FALSE)
+  }
+
+  rows <- lapply(seq_len(max(fold_ids)), function(fold) {
+    test_ids <- which(fold_ids == fold)
+    train_ids <- which(fold_ids != fold)
+    train_exposure <- sum(target_context$denominator[train_ids], na.rm = TRUE)
+    if (!is.finite(train_exposure) || train_exposure <= 0) {
+      stop("Exposure baseline needs positive training exposure in every fold.", call. = FALSE)
+    }
+    train_rate <- sum(target_context$original_truth[train_ids], na.rm = TRUE) / train_exposure
+    response <- train_rate * target_context$denominator[test_ids]
+    out <- data.table::data.table(
+      row_id = test_ids,
+      fold = fold,
+      truth = target_context$original_truth[test_ids],
+      response = response,
+      error = response - target_context$original_truth[test_ids],
+      abs_error = abs(response - target_context$original_truth[test_ids]),
+      target_mode = "exposure_baseline",
+      baseline_train_rate = train_rate,
+      denominator = target_context$denominator[test_ids]
+    )
+    if (!is.null(repeat_id)) out[, "repeat" := as.integer(repeat_id)]
+    out
+  })
+
+  out <- data.table::rbindlist(rows, fill = TRUE)
+  leading <- c("repeat", "row_id", "fold", "target_mode", "truth", "response", "error", "abs_error")
+  data.table::setcolorder(out, c(intersect(leading, names(out)), setdiff(names(out), leading)))
+  out
 }
 
 predictions_from_resample <- function(rr) {
@@ -784,7 +977,7 @@ predictions_from_resample <- function(rr) {
   }))
 }
 
-prediction_dt_from_prediction <- function(pred, fold, repeat_id = NULL) {
+prediction_dt_from_prediction <- function(pred, fold, repeat_id = NULL, target_context = NULL) {
   out <- data.table::data.table(
     row_id = pred$row_ids,
     fold = fold,
@@ -797,7 +990,7 @@ prediction_dt_from_prediction <- function(pred, fold, repeat_id = NULL) {
     out[, "repeat" := as.integer(repeat_id)]
     data.table::setcolorder(out, c("repeat", setdiff(names(out), "repeat")))
   }
-  out
+  postprocess_prediction_dt(out, target_context)
 }
 
 fold_metrics_from_predictions <- function(predictions) {
@@ -828,18 +1021,22 @@ add_regression_stratum <- function(backend, target, n_bins = 10, col_name = ".ta
   backend
 }
 
-make_regr_task <- function(id, backend, target, stratum_col = ".target_stratum") {
+make_regr_task <- function(id, backend, target, stratum_col = ".target_stratum", weight_col = NULL) {
   task <- mlr3::TaskRegr$new(id = id, backend = as.data.frame(backend), target = target)
   if (stratum_col %in% names(backend)) {
     task$set_col_roles(stratum_col, roles = "stratum")
   }
+  if (!is.null(weight_col) && !is.na(weight_col) && nzchar(weight_col) && weight_col %in% names(backend)) {
+    task$set_col_roles(weight_col, roles = c("weights_learner", "weights_measure"))
+  }
   task
 }
 
-encode_features_train_test <- function(train_dt, test_dt, target, unseen_level = ".__unseen__") {
+encode_features_train_test <- function(train_dt, test_dt, target, unseen_level = ".__unseen__", weight_col = NULL) {
   train_encoded_source <- data.table::as.data.table(data.table::copy(train_dt))
   test_encoded_source <- data.table::as.data.table(data.table::copy(test_dt))
-  feature_cols <- setdiff(names(train_encoded_source), target)
+  excluded_cols <- c(target, if (!is.null(weight_col) && !is.na(weight_col) && nzchar(weight_col)) weight_col else character(0))
+  feature_cols <- setdiff(names(train_encoded_source), excluded_cols)
   if (length(feature_cols) == 0) {
     stop("At least one predictor is required for feature encoding.", call. = FALSE)
   }
@@ -886,6 +1083,10 @@ encode_features_train_test <- function(train_dt, test_dt, target, unseen_level =
 
   encoded_train <- data.table::data.table(train_encoded_source[, ..target], data.table::as.data.table(train_x))
   encoded_test <- data.table::data.table(test_encoded_source[, ..target], data.table::as.data.table(test_x))
+  if (!is.null(weight_col) && !is.na(weight_col) && nzchar(weight_col) && weight_col %in% names(train_encoded_source)) {
+    encoded_train[, (weight_col) := train_encoded_source[[weight_col]]]
+    encoded_test[, (weight_col) := test_encoded_source[[weight_col]]]
+  }
   unseen_dt <- data.table::rbindlist(unseen_rows, fill = TRUE)
 
   list(
@@ -949,7 +1150,8 @@ collect_tuning_result_from_learner <- function(learner, outer_fold, measure_col 
 run_autotuner_outer_cv <- function(task, auto_tuner, outer_cv, seed,
                                    progress_prefix = NULL,
                                    measure_col = "regr.rmse",
-                                   repeat_id = NULL) {
+                                   repeat_id = NULL,
+                                   target_context = NULL) {
   n_folds <- outer_cv$iters
   prediction_rows <- vector("list", n_folds)
   tuning_rows <- vector("list", n_folds)
@@ -980,7 +1182,12 @@ run_autotuner_outer_cv <- function(task, auto_tuner, outer_cv, seed,
     at_fold$train(task, row_ids = train_ids)
     pred <- at_fold$predict(task, row_ids = test_ids)
 
-    prediction_rows[[fold]] <- prediction_dt_from_prediction(pred, fold = fold, repeat_id = repeat_id)
+    prediction_rows[[fold]] <- prediction_dt_from_prediction(
+      pred,
+      fold = fold,
+      repeat_id = repeat_id,
+      target_context = target_context
+    )
     tuning_rows[[fold]] <- collect_tuning_result_from_learner(
       at_fold,
       outer_fold = fold,
@@ -1021,7 +1228,8 @@ run_repeated_autotuner_outer_cv <- function(task, auto_tuner, target, n_folds,
                                             measure_col = "regr.rmse",
                                             outer_resampling = "stratified",
                                             outer_block_values = NULL,
-                                            outer_block_col = NULL) {
+                                            outer_block_col = NULL,
+                                            target_context = NULL) {
   if (outer_repeats < 1L) {
     stop("outer_repeats must be at least 1.", call. = FALSE)
   }
@@ -1031,6 +1239,7 @@ run_repeated_autotuner_outer_cv <- function(task, auto_tuner, target, n_folds,
   }
 
   predictions_by_repeat <- vector("list", outer_repeats)
+  baseline_by_repeat <- vector("list", outer_repeats)
   tuning_by_repeat <- vector("list", outer_repeats)
   learners_by_repeat <- vector("list", outer_repeats)
   include_repeat <- outer_repeats > 1L
@@ -1041,16 +1250,13 @@ run_repeated_autotuner_outer_cv <- function(task, auto_tuner, target, n_folds,
     if (identical(outer_resampling, "year_blocked")) {
       block_col <- if (is.null(outer_block_col) || is.na(outer_block_col) || !nzchar(outer_block_col)) "year" else outer_block_col
       blocked_plan <- make_year_blocked_fold_ids(outer_block_values, block_col = block_col)
+      fold_ids <- blocked_plan$fold_ids
       fold_plan <- blocked_plan$fold_plan
-      outer_cv <- make_custom_cv_from_fold_ids(task, blocked_plan$fold_ids)
+      outer_cv <- make_custom_cv_from_fold_ids(task, fold_ids)
     } else {
-      outer_cv <- make_stratified_custom_cv(
-        task,
-        target = target,
-        nfolds = n_folds,
-        seed = repeat_seed,
-        n_bins = n_bins
-      )
+      y <- task$data(cols = target)[[1]]
+      fold_ids <- make_stratified_fold_ids(y, nfolds = n_folds, seed = repeat_seed, n_bins = n_bins)
+      outer_cv <- make_custom_cv_from_fold_ids(task, fold_ids)
     }
     repeat_run <- run_autotuner_outer_cv(
       task = task,
@@ -1059,14 +1265,21 @@ run_repeated_autotuner_outer_cv <- function(task, auto_tuner, target, n_folds,
       seed = repeat_seed,
       progress_prefix = progress_prefix,
       measure_col = measure_col,
-      repeat_id = if (include_repeat) repeat_idx else NULL
+      repeat_id = if (include_repeat) repeat_idx else NULL,
+      target_context = target_context
     )
     predictions_by_repeat[[repeat_idx]] <- repeat_run$predictions
+    baseline_by_repeat[[repeat_idx]] <- exposure_baseline_predictions_from_fold_ids(
+      fold_ids,
+      target_context,
+      repeat_id = if (include_repeat) repeat_idx else NULL
+    )
     tuning_by_repeat[[repeat_idx]] <- repeat_run$tuning_results
     learners_by_repeat[[repeat_idx]] <- repeat_run$learners
   }
 
   predictions <- data.table::rbindlist(predictions_by_repeat, fill = TRUE)
+  baseline_predictions <- data.table::rbindlist(baseline_by_repeat, fill = TRUE)
   tuning_results <- data.table::rbindlist(tuning_by_repeat, fill = TRUE)
   if (nrow(tuning_results) > 0) {
     if ("repeat" %in% names(tuning_results)) {
@@ -1078,6 +1291,7 @@ run_repeated_autotuner_outer_cv <- function(task, auto_tuner, target, n_folds,
 
   list(
     predictions = predictions,
+    baseline_predictions = baseline_predictions,
     tuning_results = tuning_results,
     learners = learners_by_repeat,
     fold_plan = fold_plan
@@ -1092,7 +1306,9 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
                                                     measure_col = "regr.rmse",
                                                     outer_resampling = "stratified",
                                                     outer_block_values = NULL,
-                                                    outer_block_col = NULL) {
+                                                    outer_block_col = NULL,
+                                                    target_context = NULL,
+                                                    weight_col = NULL) {
   if (outer_repeats < 1L) {
     stop("outer_repeats must be at least 1.", call. = FALSE)
   }
@@ -1103,6 +1319,7 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
 
   raw_dt <- data.table::as.data.table(data.table::copy(raw_dt))
   predictions_by_repeat <- vector("list", outer_repeats)
+  baseline_by_repeat <- vector("list", outer_repeats)
   tuning_by_repeat <- vector("list", outer_repeats)
   learners_by_repeat <- vector("list", outer_repeats)
   unseen_by_repeat <- vector("list", outer_repeats)
@@ -1149,7 +1366,7 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
         ", test rows=", length(test_ids)
       )
 
-      encoded <- encode_features_train_test(raw_dt[train_ids], raw_dt[test_ids], target = target)
+      encoded <- encode_features_train_test(raw_dt[train_ids], raw_dt[test_ids], target = target, weight_col = weight_col)
       train_task <- mlr3::TaskRegr$new(
         id = sprintf("%s_train_r%s_f%s", task_id, repeat_idx, fold),
         backend = as.data.frame(encoded$train),
@@ -1160,6 +1377,10 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
         backend = as.data.frame(encoded$test),
         target = target
       )
+      if (!is.null(weight_col) && !is.na(weight_col) && nzchar(weight_col) && weight_col %in% names(encoded$train)) {
+        train_task$set_col_roles(weight_col, roles = c("weights_learner", "weights_measure"))
+        test_task$set_col_roles(weight_col, roles = c("weights_learner", "weights_measure"))
+      }
 
       at_fold <- auto_tuner$clone(deep = TRUE)
       set.seed(repeat_seed + fold - 1L)
@@ -1178,6 +1399,7 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
         prediction_rows[[fold]][, "repeat" := as.integer(repeat_idx)]
         data.table::setcolorder(prediction_rows[[fold]], c("repeat", setdiff(names(prediction_rows[[fold]]), "repeat")))
       }
+      prediction_rows[[fold]] <- postprocess_prediction_dt(prediction_rows[[fold]], target_context)
 
       tuning_rows[[fold]] <- collect_tuning_result_from_learner(
         at_fold,
@@ -1204,12 +1426,18 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
     }
 
     predictions_by_repeat[[repeat_idx]] <- data.table::rbindlist(prediction_rows, fill = TRUE)
+    baseline_by_repeat[[repeat_idx]] <- exposure_baseline_predictions_from_fold_ids(
+      fold_ids,
+      target_context,
+      repeat_id = if (include_repeat) repeat_idx else NULL
+    )
     tuning_by_repeat[[repeat_idx]] <- data.table::rbindlist(tuning_rows, fill = TRUE)
     learners_by_repeat[[repeat_idx]] <- fitted_learners
     unseen_by_repeat[[repeat_idx]] <- data.table::rbindlist(unseen_rows, fill = TRUE)
   }
 
   predictions <- data.table::rbindlist(predictions_by_repeat, fill = TRUE)
+  baseline_predictions <- data.table::rbindlist(baseline_by_repeat, fill = TRUE)
   tuning_results <- data.table::rbindlist(tuning_by_repeat, fill = TRUE)
   unseen_levels <- data.table::rbindlist(unseen_by_repeat, fill = TRUE)
   if (nrow(tuning_results) > 0) {
@@ -1222,6 +1450,7 @@ run_repeated_encoded_autotuner_outer_cv <- function(raw_dt, target, auto_tuner,
 
   list(
     predictions = predictions,
+    baseline_predictions = baseline_predictions,
     tuning_results = tuning_results,
     learners = learners_by_repeat,
     unseen_levels = unseen_levels,

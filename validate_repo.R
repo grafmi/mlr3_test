@@ -61,6 +61,12 @@ OUTER_BLOCK_COL <- normalize_optional_string(get_setting(
   get_setting("outer-year-col", "OUTER_YEAR_COL", config_value_or(CONFIG, c("experiment", "outer_block_col"), "year"))
 ))
 if (identical(OUTER_RESAMPLING, "year_blocked") && is.na(OUTER_BLOCK_COL)) OUTER_BLOCK_COL <- "year"
+TARGET_MODE <- normalize_target_mode(get_setting("target-mode", "TARGET_MODE", config_value_or(CONFIG, c("experiment", "target_mode"), "count")))
+TARGET_DENOMINATOR_COL <- normalize_optional_string(get_setting(
+  "target-denominator-col", "TARGET_DENOMINATOR_COL",
+  get_setting("target-denominator", "TARGET_DENOMINATOR", config_value_or(CONFIG, c("experiment", "target_denominator_col"), ""))
+))
+WEIGHT_COL <- normalize_optional_string(get_setting("weight-col", "WEIGHT_COL", config_value_or(CONFIG, c("experiment", "weight_col"), "")))
 MISSING_DROP_WARN_FRACTION <- get_optional_numeric_setting(
   "missing-drop-warn-fraction", "MISSING_DROP_WARN_FRACTION",
   config_value_or(CONFIG, c("experiment", "missing_drop_warn_fraction"), 0.05),
@@ -142,6 +148,9 @@ write_validation_report <- function(output_dir, checks_dt, resolved_config, dict
     sprintf("- inner_folds: `%s`", resolved_config$inner_folds),
     sprintf("- outer_resampling: `%s`", resolved_config$outer_resampling),
     sprintf("- outer_block_col: `%s`", if (!is.na(resolved_config$outer_block_col)) resolved_config$outer_block_col else "<none>"),
+    sprintf("- target_mode: `%s`", resolved_config$target_mode),
+    sprintf("- target_denominator_col: `%s`", if (!is.na(resolved_config$target_denominator_col)) resolved_config$target_denominator_col else "<none>"),
+    sprintf("- weight_col: `%s`", if (!is.na(resolved_config$weight_col)) resolved_config$weight_col else "<none>"),
     sprintf("- missing_drop_warn_fraction: `%s`", if (is.na(resolved_config$missing_drop_warn_fraction)) "<disabled>" else resolved_config$missing_drop_warn_fraction),
     "",
     "## Checks",
@@ -231,6 +240,9 @@ with_run_finalizer({
     inner_folds = INNER_FOLDS,
     outer_resampling = OUTER_RESAMPLING,
     outer_block_col = if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else NA_character_,
+    target_mode = TARGET_MODE,
+    target_denominator_col = if (identical(TARGET_MODE, "rate")) TARGET_DENOMINATOR_COL else NA_character_,
+    weight_col = WEIGHT_COL,
     missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
   )
   write_config_snapshot(OUTPUT_DIR, resolved_config)
@@ -277,7 +289,9 @@ with_run_finalizer({
     dictionary_dt <- dictionary_filter$data
     dictionary_cols <- intersect(unique(c(
       TARGET, FEATURE_COLS, ZINB_FEATURE_COLS, ID_COLS, zero_formula_cols,
-      if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else character(0)
+      if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else character(0),
+      if (identical(TARGET_MODE, "rate")) TARGET_DENOMINATOR_COL else character(0),
+      if (!is.na(WEIGHT_COL)) WEIGHT_COL else character(0)
     )), names(dictionary_dt))
     dictionary_dt <- dictionary_dt[, ..dictionary_cols]
     validation_dictionary <<- data_dictionary(dictionary_dt, target = TARGET, feature_cols = unique(c(FEATURE_COLS, ZINB_FEATURE_COLS)), id_cols = ID_COLS)
@@ -290,7 +304,9 @@ with_run_finalizer({
       extra_feature_cols = unique(c(
         zero_formula_cols,
         zinb_extra_feature_cols,
-        if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else character(0)
+        if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else character(0),
+        if (identical(TARGET_MODE, "rate")) TARGET_DENOMINATOR_COL else character(0),
+        if (!is.na(WEIGHT_COL)) WEIGHT_COL else character(0)
       )),
       missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
     )
@@ -299,6 +315,24 @@ with_run_finalizer({
       record_check("modeling_data_loads", TRUE, sprintf("%s row(s), %s column(s)", nrow(work_dt), ncol(work_dt))),
       record_check("target_and_features_present", TRUE, paste(c(TARGET, FEATURE_COLS), collapse = ", ")),
       record_check("zinb_feature_cols_present", TRUE, paste(ZINB_FEATURE_COLS, collapse = ", "))
+    )
+    target_context <- make_target_context(
+      work_dt,
+      target = TARGET,
+      feature_cols = FEATURE_COLS,
+      target_mode = TARGET_MODE,
+      target_denominator_col = TARGET_DENOMINATOR_COL,
+      weight_col = WEIGHT_COL
+    )
+    checks_local[[length(checks_local) + 1L]] <- record_check(
+      "mlr3_target_mode_valid",
+      TRUE,
+      sprintf(
+        "target_mode=%s, denominator=%s, weight=%s",
+        target_context$target_mode,
+        if (!is.na(target_context$target_denominator_col)) target_context$target_denominator_col else "<none>",
+        if (!is.na(target_context$weight_col)) target_context$weight_col else "<none>"
+      )
     )
     if (identical(OUTER_RESAMPLING, "year_blocked")) {
       year_plan <- make_year_blocked_fold_ids(work_dt[[OUTER_BLOCK_COL]], block_col = OUTER_BLOCK_COL)

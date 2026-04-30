@@ -51,7 +51,7 @@ METRIC_TO_RANK <- get_setting("metric", "METRIC_TO_RANK", config_value(CONFIG, c
 # Helpers
 # =========================
 safe_metrics_row <- function(dt, model_name) {
-  needed <- c("rmse", "mae", "max_error", "sae", "mse", "bias", "r2", "poisson_deviance", "negloglik")
+  needed <- c("rmse", "mae", "max_error", "sae", "mse", "bias", "r2", "wape", "poisson_deviance", "negloglik")
   out <- data.table(model = model_name)
   for (nm in needed) {
     value <- if (!is.null(dt) && nm %in% names(dt) && nrow(dt) > 0) dt[[nm]][1] else NA_real_
@@ -197,7 +197,7 @@ with_run_finalizer({
   comparison[, rank_missing := NULL]
   setcolorder(comparison, c(
     "rank", "model", "availability_status", "availability_reason", "manifest_status",
-    "rmse", "mae", "max_error", "sae", "mse", "bias", "r2", "poisson_deviance", "negloglik", "details"
+    "rmse", "mae", "max_error", "sae", "mse", "bias", "r2", "wape", "poisson_deviance", "negloglik", "details"
   ))
 
   out_path <- file.path(OUTPUT_DIR, "best_models_comparison.csv")
@@ -217,6 +217,7 @@ with_run_finalizer({
     sprintf("- rmse: `%s`", best_row$rmse[[1]]),
     sprintf("- mae: `%s`", best_row$mae[[1]]),
     sprintf("- r2: `%s`", best_row$r2[[1]]),
+    sprintf("- wape: `%s`", best_row$wape[[1]]),
     sprintf("- poisson_deviance: `%s`", best_row$poisson_deviance[[1]]),
     sprintf("- negloglik: `%s`", best_row$negloglik[[1]]),
     "",

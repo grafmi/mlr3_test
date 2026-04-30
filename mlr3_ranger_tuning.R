@@ -74,6 +74,12 @@ OUTER_BLOCK_COL <- normalize_optional_string(get_setting(
   get_setting("outer-year-col", "OUTER_YEAR_COL", config_value_or(CONFIG, c("experiment", "outer_block_col"), "year"))
 ))
 if (identical(OUTER_RESAMPLING, "year_blocked") && is.na(OUTER_BLOCK_COL)) OUTER_BLOCK_COL <- "year"
+TARGET_MODE <- normalize_target_mode(get_setting("target-mode", "TARGET_MODE", config_value_or(CONFIG, c("experiment", "target_mode"), "count")))
+TARGET_DENOMINATOR_COL <- normalize_optional_string(get_setting(
+  "target-denominator-col", "TARGET_DENOMINATOR_COL",
+  get_setting("target-denominator", "TARGET_DENOMINATOR", config_value_or(CONFIG, c("experiment", "target_denominator_col"), ""))
+))
+WEIGHT_COL <- normalize_optional_string(get_setting("weight-col", "WEIGHT_COL", config_value_or(CONFIG, c("experiment", "weight_col"), "")))
 SEED <- get_int_setting("seed", "SEED", config_value(CONFIG, c("experiment", "seed")))
 TUNE_EVALS <- get_int_setting("tune-evals", "TUNE_EVALS", config_value(CONFIG, c("ranger", "tune_evals")), min_value = 1)
 TUNE_BATCH_SIZE <- get_int_setting(
@@ -105,6 +111,12 @@ with_run_finalizer({
   if (identical(OUTER_RESAMPLING, "year_blocked") && identical(OUTER_BLOCK_COL, TARGET)) {
     stop("OUTER_BLOCK_COL must not be the target column.", call. = FALSE)
   }
+  if (identical(TARGET_MODE, "rate") && identical(TARGET_DENOMINATOR_COL, TARGET)) {
+    stop("TARGET_DENOMINATOR_COL must not be the target column.", call. = FALSE)
+  }
+  if (!is.na(WEIGHT_COL) && identical(WEIGHT_COL, TARGET)) {
+    stop("WEIGHT_COL must not be the target column.", call. = FALSE)
+  }
 
   set.seed(SEED)
   if (N_WORKERS > 1) {
@@ -119,15 +131,28 @@ with_run_finalizer({
   work_dt <- prepare_modeling_data(
     df, TARGET, FEATURE_COLS, ID_COLS,
     row_filter = ROW_FILTER,
-    extra_feature_cols = if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else character(0),
+    extra_feature_cols = unique(c(
+      if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else character(0),
+      if (identical(TARGET_MODE, "rate")) TARGET_DENOMINATOR_COL else character(0),
+      if (!is.na(WEIGHT_COL)) WEIGHT_COL else character(0)
+    )),
     missing_drop_warn_fraction = MISSING_DROP_WARN_FRACTION
   )
   outer_block_values <- if (identical(OUTER_RESAMPLING, "year_blocked")) work_dt[[OUTER_BLOCK_COL]] else NULL
-  model_dt <- if (identical(OUTER_RESAMPLING, "year_blocked") && !(OUTER_BLOCK_COL %in% FEATURE_COLS)) {
+  split_dt <- if (identical(OUTER_RESAMPLING, "year_blocked") && !(OUTER_BLOCK_COL %in% FEATURE_COLS)) {
     work_dt[, setdiff(names(work_dt), OUTER_BLOCK_COL), with = FALSE]
   } else {
     work_dt
   }
+  target_context <- make_target_context(
+    split_dt,
+    target = TARGET,
+    feature_cols = FEATURE_COLS,
+    target_mode = TARGET_MODE,
+    target_denominator_col = TARGET_DENOMINATOR_COL,
+    weight_col = WEIGHT_COL
+  )
+  model_dt <- target_context$data
   effective_outer_folds <- if (identical(OUTER_RESAMPLING, "year_blocked")) {
     year_plan <- make_year_blocked_fold_ids(outer_block_values, block_col = OUTER_BLOCK_COL)
     min_train_rows <- nrow(model_dt) - max(year_plan$fold_plan$n_rows)
@@ -149,6 +174,10 @@ with_run_finalizer({
     data_path = normalizePath(DATA_PATH, mustWork = FALSE),
     output_dir = normalizePath(OUTPUT_DIR, mustWork = FALSE),
     target = TARGET,
+    model_target = target_context$target,
+    target_mode = TARGET_MODE,
+    target_denominator_col = target_context$target_denominator_col,
+    weight_col = target_context$weight_col,
     feature_cols = FEATURE_COLS,
     id_cols = ID_COLS,
     row_filter = ROW_FILTER,
@@ -176,14 +205,17 @@ with_run_finalizer({
   if (nzchar(trimws(ROW_FILTER))) log_info("Using row filter: ", ROW_FILTER)
   log_dataset_overview(
     model_dt,
-    target = TARGET,
-    feature_cols = FEATURE_COLS,
+    target = target_context$target,
+    feature_cols = target_context$feature_cols,
     id_cols = ID_COLS,
     metric = "rmse",
     extra = list(
       "Outer repeats" = OUTER_REPEATS,
       "Outer resampling" = OUTER_RESAMPLING,
       "Outer block column" = if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else "<none>",
+      "Target mode" = TARGET_MODE,
+      "Target denominator column" = if (!is.na(target_context$target_denominator_col)) target_context$target_denominator_col else "<none>",
+      "Weight column" = if (!is.na(target_context$weight_col)) target_context$weight_col else "<none>",
       "Outer folds / inner folds" = paste(effective_outer_folds, INNER_FOLDS, sep = " / "),
       "Missing-drop warn fraction" = if (is.na(MISSING_DROP_WARN_FRACTION)) "<disabled>" else MISSING_DROP_WARN_FRACTION,
       "Tuning evals" = TUNE_EVALS,
@@ -193,11 +225,16 @@ with_run_finalizer({
       "Ranger num.threads" = 1L
     )
   )
-  overview_dt <- dataset_overview(model_dt, target = TARGET, feature_cols = FEATURE_COLS, id_cols = ID_COLS)
+  overview_dt <- dataset_overview(model_dt, target = target_context$target, feature_cols = target_context$feature_cols, id_cols = ID_COLS)
   safe_write_csv(overview_dt, file.path(OUTPUT_DIR, "ranger_dataset_overview.csv"))
 
-  backend <- add_regression_stratum(as.data.frame(model_dt), target = TARGET, n_bins = STRATA_BINS)
-  task <- make_regr_task("ranger_regression", backend = backend, target = TARGET)
+  backend <- add_regression_stratum(as.data.frame(model_dt), target = target_context$target, n_bins = STRATA_BINS)
+  task <- make_regr_task(
+    "ranger_regression",
+    backend = backend,
+    target = target_context$target,
+    weight_col = target_context$model_weight_col
+  )
 
   learner <- lrn(
     "regr.ranger",
@@ -253,7 +290,7 @@ with_run_finalizer({
   cv_run <- run_repeated_autotuner_outer_cv(
     task = task,
     auto_tuner = at,
-    target = TARGET,
+    target = target_context$target,
     n_folds = N_FOLDS,
     outer_repeats = OUTER_REPEATS,
     seed = SEED,
@@ -261,16 +298,29 @@ with_run_finalizer({
     progress_prefix = "Ranger",
     outer_resampling = OUTER_RESAMPLING,
     outer_block_values = outer_block_values,
-    outer_block_col = OUTER_BLOCK_COL
+    outer_block_col = OUTER_BLOCK_COL,
+    target_context = target_context
   )
   predictions <- cv_run$predictions
   fold_metrics <- fold_metrics_from_predictions(predictions)
   overall_metrics <- aggregate_predictions(predictions)
+  model_scale_fold_metrics <- model_scale_fold_metrics_from_predictions(predictions)
+  model_scale_overall_metrics <- model_scale_aggregate_predictions(predictions)
+  baseline_predictions <- cv_run$baseline_predictions
+  baseline_fold_metrics <- if (!is.null(baseline_predictions) && nrow(baseline_predictions) > 0) fold_metrics_from_predictions(baseline_predictions) else data.table()
+  baseline_overall_metrics <- if (!is.null(baseline_predictions) && nrow(baseline_predictions) > 0) aggregate_predictions(baseline_predictions) else data.table()
   best_params <- cv_run$tuning_results
 
   safe_write_csv(fold_metrics, file.path(OUTPUT_DIR, "ranger_fold_metrics.csv"))
   safe_write_csv(overall_metrics, file.path(OUTPUT_DIR, "ranger_overall_metrics.csv"))
+  safe_write_csv(model_scale_fold_metrics, file.path(OUTPUT_DIR, "ranger_model_scale_fold_metrics.csv"))
+  safe_write_csv(model_scale_overall_metrics, file.path(OUTPUT_DIR, "ranger_model_scale_overall_metrics.csv"))
   safe_write_csv(predictions, file.path(OUTPUT_DIR, "ranger_cv_predictions.csv"))
+  if (!is.null(baseline_predictions) && nrow(baseline_predictions) > 0) {
+    safe_write_csv(baseline_predictions, file.path(OUTPUT_DIR, "ranger_exposure_baseline_predictions.csv"))
+    safe_write_csv(baseline_fold_metrics, file.path(OUTPUT_DIR, "ranger_exposure_baseline_fold_metrics.csv"))
+    safe_write_csv(baseline_overall_metrics, file.path(OUTPUT_DIR, "ranger_exposure_baseline_overall_metrics.csv"))
+  }
   safe_write_csv(best_params, file.path(OUTPUT_DIR, "ranger_best_params.csv"))
   if (!is.null(cv_run$fold_plan) && nrow(cv_run$fold_plan) > 0) {
     safe_write_csv(cv_run$fold_plan, file.path(OUTPUT_DIR, "ranger_outer_fold_blocks.csv"))
@@ -312,6 +362,10 @@ with_run_finalizer({
     sprintf("- outer_repeats: `%s`", OUTER_REPEATS),
     sprintf("- outer_resampling: `%s`", OUTER_RESAMPLING),
     sprintf("- outer_block_col: `%s`", if (identical(OUTER_RESAMPLING, "year_blocked")) OUTER_BLOCK_COL else "<none>"),
+    sprintf("- target_mode: `%s`", TARGET_MODE),
+    sprintf("- model_target: `%s`", target_context$target),
+    sprintf("- target_denominator_col: `%s`", if (!is.na(target_context$target_denominator_col)) target_context$target_denominator_col else "<none>"),
+    sprintf("- weight_col: `%s`", if (!is.na(target_context$weight_col)) target_context$weight_col else "<none>"),
     sprintf("- tune_evals: `%s`", TUNE_EVALS),
     sprintf("- tune_batch_size: `%s`", TUNE_BATCH_SIZE),
     sprintf("- effective_tune_batch_size: `%s`", EFFECTIVE_TUNE_BATCH_SIZE),
@@ -328,12 +382,19 @@ with_run_finalizer({
     sprintf("- rmse: `%.6f`", overall_metrics$rmse[[1]]),
     sprintf("- mae: `%.6f`", overall_metrics$mae[[1]]),
     sprintf("- r2: `%.6f`", overall_metrics$r2[[1]]),
+    sprintf("- wape: `%.6f`", overall_metrics$wape[[1]]),
     sprintf("- poisson_deviance: `%.6f`", overall_metrics$poisson_deviance[[1]]),
+    sprintf("- model_scale_rmse: `%.6f`", model_scale_overall_metrics$rmse[[1]]),
     "",
     "## Outputs",
     "- `ranger_fold_metrics.csv` / `.rds`",
     "- `ranger_overall_metrics.csv` / `.rds`",
+    "- `ranger_model_scale_fold_metrics.csv` / `.rds`",
+    "- `ranger_model_scale_overall_metrics.csv` / `.rds`",
     "- `ranger_cv_predictions.csv` / `.rds`",
+    "- `ranger_exposure_baseline_predictions.csv` / `.rds` when rate target mode is used",
+    "- `ranger_exposure_baseline_fold_metrics.csv` / `.rds` when rate target mode is used",
+    "- `ranger_exposure_baseline_overall_metrics.csv` / `.rds` when rate target mode is used",
     "- `ranger_best_params.csv` / `.rds`",
     "- `ranger_outer_fold_blocks.csv` / `.rds` when year-blocked outer validation is used",
     "- `resolved_config.txt` / `.rds`",

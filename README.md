@@ -135,6 +135,9 @@ The file is grouped so that the most important settings appear first:
   `ranger` and `xgboost`
 - `CONFIG$experiment$outer_repeats`: optional number of repeated outer-CV runs
   for `ranger` and `xgboost`; missing values default to `1`
+- `CONFIG$experiment$target_mode`: optional `ranger`/XGBoost target scale;
+  `"count"` keeps the original target, while `"rate"` trains on
+  `target / target_denominator_col`, optionally using `weight_col`
 - `CONFIG$experiment$missing_drop_warn_fraction`: warn when modeling drops more
   than this fraction of rows with missing values; set to `NA` to disable
 - `CONFIG$preprocess`: preprocessing defaults and factor handling
@@ -339,6 +342,7 @@ Rscript mlr3_ranger_tuning.R --row-filter="split == 'train'" --features=prcrank,
 Rscript mlr3_ranger_tuning.R --data=/path/to/data.csv --folds=10 --inner-folds=5 --tune-evals=20 --tune-batch-size=4 --workers=16
 Rscript mlr3_ranger_tuning.R --outer-repeats=3 --folds=5 --inner-folds=3
 Rscript mlr3_ranger_tuning.R --outer-resampling=year_blocked --outer-block-col=year
+Rscript mlr3_ranger_tuning.R --target-mode=rate --target-denominator-col=potenzielle_kunden --weight-col=potenzielle_kunden
 Rscript mlr3_xgb_tuning.R --output-dir=outputs_xgb_custom --tune-batch-size=4
 Rscript zinb_stepwise_cv.R --metric=poisson_deviance --max-vars=3 --workers=4
 Rscript zinb_stepwise_cv.R --features=prcrank,potenzielle_kunden
@@ -355,7 +359,8 @@ The same settings can be controlled with environment variables, for example
 `PREPROCESS_SAMPLE_ROWS`, `PREPROCESS_SAMPLE_SEED`,
 `PREPROCESS_CHARS_TO_FACTORS`, `PREPROCESS_FACTOR_MIN_COUNT`,
 `MLR3_DATA_PATH`, `ROW_FILTER`, `N_FOLDS`, `INNER_FOLDS`, `OUTER_REPEATS`,
-`OUTER_RESAMPLING`, `OUTER_BLOCK_COL`, `OUTER_YEAR_COL`, `TUNE_EVALS`, `N_WORKERS`,
+`OUTER_RESAMPLING`, `OUTER_BLOCK_COL`, `OUTER_YEAR_COL`, `TARGET_MODE`,
+`TARGET_DENOMINATOR_COL`, `WEIGHT_COL`, `TUNE_EVALS`, `N_WORKERS`,
 `TUNE_BATCH_SIZE`, `RANGER_TUNE_BATCH_SIZE`, `XGB_TUNE_BATCH_SIZE`,
 `RANGER_OUTPUT_DIR`, `XGB_OUTPUT_DIR`, `ZINB_OUTPUT_DIR`, and
 `COMPARISON_OUTPUT_DIR`. The full-run wrapper also supports `RUN_ZINB=false`
@@ -394,6 +399,14 @@ fold. `outer_block_col` / `--outer-block-col` names the year column; it is used
 only for splitting unless it is also explicitly listed in the model features.
 Year-blocked outer validation is deterministic, so `outer_repeats` must remain
 `1`.
+For `ranger` and XGBoost, `target_mode = "rate"` trains on
+`target / target_denominator_col` and postprocesses predictions back to the
+original count scale. The usual `truth`, `response`, `error`, and
+`*_overall_metrics.csv` values remain on the original count scale so
+`compare_best_models.R` can still rank count and rate runs consistently.
+The direct model-scale values are written as `model_truth`, `model_response`,
+`*_model_scale_*_metrics.csv`, and optional exposure-baseline outputs when a
+rate denominator is configured.
 
 As a practical rule of thumb:
 
@@ -479,6 +492,13 @@ For repeated mlr3 runs, `*_cv_predictions.csv`, `*_fold_metrics.csv`, and
 `*_best_params.csv` gain a `repeat` column when `outer_repeats > 1`. The
 `*_overall_metrics.csv` files keep the same schema so downstream comparison
 scripts remain compatible.
+For rate-target mlr3 runs, `*_cv_predictions.csv` additionally includes
+`model_truth`, `model_response`, `denominator`, `weight`, and
+`postprocessed_response`; count-scale metrics remain in `*_overall_metrics.csv`,
+while direct model-scale metrics are written to
+`*_model_scale_overall_metrics.csv` and `*_model_scale_fold_metrics.csv`.
+Exposure-baseline files are written as `*_exposure_baseline_*` when
+`target_mode = "rate"`.
 
 Additional ZINB transparency outputs include:
 

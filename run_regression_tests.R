@@ -282,6 +282,93 @@ tests[[length(tests) + 1L]] <- record_test(
   }
 )
 
+# Rate target mode should train on target / exposure while reporting comparable
+# count-scale predictions and metrics for ranger and XGBoost.
+rate_target_fixture_dir <- file.path(TEST_OUTPUT_DIR, "rate_target_fixture")
+unlink(rate_target_fixture_dir, recursive = TRUE, force = TRUE)
+dir.create(rate_target_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+
+rate_target_input <- file.path(rate_target_fixture_dir, "input.csv")
+rate_target_dt <- data.table(
+  count = c(2, 3, 5, 4, 6, 8, 3, 4, 7, 5, 9, 10),
+  feature_a = c(1, 2, 3, 2, 4, 5, 1, 3, 4, 2, 5, 6),
+  exposure = c(20, 30, 50, 40, 60, 80, 30, 40, 70, 50, 90, 100)
+)
+safe_write_csv(rate_target_dt, rate_target_input)
+
+run_rate_target_model <- function(script_name, output_dir) {
+  run_script(
+    script_name,
+    args = c(
+      sprintf("--data=%s", rate_target_input),
+      sprintf("--output-dir=%s", output_dir),
+      "--target=count",
+      "--features=feature_a",
+      "--target-mode=rate",
+      "--target-denominator-col=exposure",
+      "--weight-col=exposure",
+      "--folds=2",
+      "--inner-folds=2",
+      "--tune-evals=1",
+      "--workers=1"
+    )
+  )
+}
+
+check_rate_target_outputs <- function(output_dir, prefix) {
+  predictions <- read_csv_if_exists(file.path(output_dir, sprintf("%s_cv_predictions.csv", prefix)))
+  overall <- read_csv_if_exists(file.path(output_dir, sprintf("%s_overall_metrics.csv", prefix)))
+  model_overall <- read_csv_if_exists(file.path(output_dir, sprintf("%s_model_scale_overall_metrics.csv", prefix)))
+  baseline_overall <- read_csv_if_exists(file.path(output_dir, sprintf("%s_exposure_baseline_overall_metrics.csv", prefix)))
+  config_path <- file.path(output_dir, "resolved_config.rds")
+  resolved_config <- if (file.exists(config_path)) readRDS(config_path) else list()
+
+  !is.null(predictions) &&
+    !is.null(overall) &&
+    !is.null(model_overall) &&
+    !is.null(baseline_overall) &&
+    identical(resolved_config$target_mode, "rate") &&
+    identical(resolved_config$target_denominator_col, "exposure") &&
+    identical(resolved_config$weight_col, "exposure") &&
+    all(c("truth", "response", "model_truth", "model_response", "denominator", "weight", "postprocessed_response") %in% names(predictions)) &&
+    all(abs(predictions$truth - rate_target_dt$count[predictions$row_id]) < 1e-8) &&
+    all(abs(predictions$model_truth - rate_target_dt$count[predictions$row_id] / rate_target_dt$exposure[predictions$row_id]) < 1e-8) &&
+    all(abs(predictions$response - predictions$model_response * predictions$denominator) < 1e-8) &&
+    all(abs(predictions$postprocessed_response - predictions$response) < 1e-8) &&
+    all(abs(predictions$weight - rate_target_dt$exposure[predictions$row_id]) < 1e-8) &&
+    "wape" %in% names(overall) &&
+    "wape" %in% names(model_overall) &&
+    nrow(baseline_overall) == 1L
+}
+
+rate_ranger_out <- file.path(rate_target_fixture_dir, "ranger_outputs")
+rate_ranger_run <- run_rate_target_model("mlr3_ranger_tuning.R", rate_ranger_out)
+rate_ranger_ok <- rate_ranger_run$status == 0 && check_rate_target_outputs(rate_ranger_out, "ranger")
+
+tests[[length(tests) + 1L]] <- record_test(
+  "ranger_rate_target_reports_count_and_model_scales",
+  rate_ranger_ok,
+  if (rate_ranger_ok) {
+    "ranger rate-target mode reports count-scale predictions, model-scale metrics, weights, and exposure baseline"
+  } else {
+    paste("ranger rate-target run did not produce expected outputs:", rate_ranger_run$output)
+  }
+)
+
+rate_xgb_out <- file.path(rate_target_fixture_dir, "xgb_outputs")
+rate_xgb_run <- run_rate_target_model("mlr3_xgb_tuning.R", rate_xgb_out)
+rate_xgb_ok <- rate_xgb_run$status == 0 && check_rate_target_outputs(rate_xgb_out, "xgb")
+
+tests[[length(tests) + 1L]] <- record_test(
+  "xgb_rate_target_reports_count_and_model_scales",
+  rate_xgb_ok,
+  if (rate_xgb_ok) {
+    "XGBoost rate-target mode reports count-scale predictions, model-scale metrics, weights, and exposure baseline"
+  } else {
+    paste("XGBoost rate-target run did not produce expected outputs:", rate_xgb_run$output)
+  }
+)
+
 # validate_repo.R should warn when missing-value row drops exceed the threshold
 missing_warn_fixture_dir <- file.path(TEST_OUTPUT_DIR, "missing_warn_fixture")
 unlink(missing_warn_fixture_dir, recursive = TRUE, force = TRUE)

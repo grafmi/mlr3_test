@@ -29,6 +29,13 @@ CONFIG <- list(
     # splitting unless it is also listed in feature_cols.
     outer_resampling = "stratified",
     outer_block_col = "year",
+    # Target scale for ranger and XGBoost. "count" keeps the original target.
+    # "rate" trains on target / target_denominator_col, postprocesses
+    # predictions back to the original count scale, and can use weight_col as
+    # an observation weight. ZINB always keeps the original count target.
+    target_mode = "count",
+    target_denominator_col = "",
+    weight_col = "",
     # Number of folds used in the inner tuning loop for mlr3 models. This can
     # be smaller than `n_folds` to speed up tuning while keeping the outer
     # validation loop unchanged.
