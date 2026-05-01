@@ -32,6 +32,10 @@ row_filter <- "" # z.B. "segment == 'A' & year >= 2021"; leer lassen fuer alles
 output_dir <- Sys.getenv("LOYO_OUTPUT_DIR", file.path(repo_dir, "outputs_loyo_exploration"))
 seed <- 123L
 learner_threads <- 1L
+parallel_folds <- TRUE
+available_cores <- parallel::detectCores(logical = FALSE)
+if (is.na(available_cores)) available_cores <- 2L
+fold_workers <- max(1L, min(4L, available_cores - 1L))
 run_models <- c("ranger", "xgb", "zinb")
 
 configs <- list(
@@ -86,6 +90,8 @@ needed <- c(
   "data.table",
   "mlr3",
   "mlr3learners",
+  if (parallel_folds) "future" else character(0),
+  if (parallel_folds) "future.apply" else character(0),
   if ("ranger" %in% run_models) "ranger" else character(0),
   if ("xgb" %in% run_models) "xgboost" else character(0)
 )
@@ -93,6 +99,23 @@ missing <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
 if (length(missing) > 0L) stop("Missing package(s): ", paste(missing, collapse = ", "), call. = FALSE)
 if ("zinb" %in% run_models && !requireNamespace("pscl", quietly = TRUE)) {
   stop("Package `pscl` is needed when run_models contains 'zinb'.", call. = FALSE)
+}
+if (parallel_folds) {
+  future_plan_ok <- tryCatch(
+    {
+      future::plan(future::multisession, workers = fold_workers)
+      TRUE
+    },
+    error = function(e) {
+      warning("Could not start future multisession workers; falling back to sequential folds: ", conditionMessage(e))
+      FALSE
+    }
+  )
+  if (future_plan_ok) {
+    on.exit(future::plan(future::sequential), add = TRUE)
+  } else {
+    parallel_folds <- FALSE
+  }
 }
 
 raw_dt <- if (exists("dt", envir = .GlobalEnv, inherits = FALSE)) {
@@ -268,13 +291,20 @@ make_loyo <- function(work_dt) {
   list(fold_ids = blocked$fold_ids, fold_plan = blocked$fold_plan)
 }
 
+run_fold_indices <- function(fold_count, fold_fun) {
+  folds <- seq_len(fold_count)
+  if (parallel_folds && fold_workers > 1L && fold_count > 1L) {
+    return(future.apply::future_lapply(folds, fold_fun, future.seed = TRUE))
+  }
+  lapply(folds, fold_fun)
+}
+
 run_mlr3_fixed <- function(work_dt, fold_ids, conf, conf_name, model) {
   features <- model_features(conf, model)
   params <- model_params(conf, model)
   fold_count <- max(fold_ids)
-  rows <- vector("list", fold_count)
 
-  for (fold in seq_len(fold_count)) {
+  rows <- run_fold_indices(fold_count, function(fold) {
     train_ids <- which(fold_ids != fold)
     test_ids <- which(fold_ids == fold)
 
@@ -284,33 +314,37 @@ run_mlr3_fixed <- function(work_dt, fold_ids, conf, conf_name, model) {
         work_dt[test_ids, c(target, features), with = FALSE],
         target = target
       )
-      train_task <- TaskRegr$new(
+      train_task <- mlr3::TaskRegr$new(
         sprintf("%s_%s_train_f%s", conf_name, model, fold),
         as.data.frame(encoded$train),
         target
       )
-      test_task <- TaskRegr$new(sprintf("%s_%s_test_f%s", conf_name, model, fold), as.data.frame(encoded$test), target)
-      learner <- lrn("regr.xgboost", predict_type = "response", nthread = learner_threads)
+      test_task <- mlr3::TaskRegr$new(
+        sprintf("%s_%s_test_f%s", conf_name, model, fold),
+        as.data.frame(encoded$test),
+        target
+      )
+      learner <- mlr3::lrn("regr.xgboost", predict_type = "response", nthread = learner_threads)
     } else {
-      train_task <- TaskRegr$new(
+      train_task <- mlr3::TaskRegr$new(
         sprintf("%s_%s_train_f%s", conf_name, model, fold),
         as.data.frame(work_dt[train_ids, c(target, features), with = FALSE]),
         target
       )
-      test_task <- TaskRegr$new(
+      test_task <- mlr3::TaskRegr$new(
         sprintf("%s_%s_test_f%s", conf_name, model, fold),
         as.data.frame(work_dt[test_ids, c(target, features), with = FALSE]),
         target
       )
-      learner <- lrn("regr.ranger", predict_type = "response", num.threads = learner_threads)
+      learner <- mlr3::lrn("regr.ranger", predict_type = "response", num.threads = learner_threads)
     }
 
     learner <- apply_params(learner, params, paste(conf_name, model))
     set.seed(seed + fold)
     learner$train(train_task)
     pred <- learner$predict(test_task)
-    rows[[fold]] <- prediction_rows(work_dt, test_ids, fold, model, conf_name, pred$response)
-  }
+    prediction_rows(work_dt, test_ids, fold, model, conf_name, pred$response)
+  })
   rbindlist(rows)
 }
 
@@ -330,9 +364,8 @@ run_zinb_fixed <- function(work_dt, fold_ids, conf, conf_name) {
     stop("zinb$zeroinfl_args must not set: ", paste(reserved_fit_args, collapse = ", "), call. = FALSE)
   }
   fold_count <- max(fold_ids)
-  rows <- vector("list", fold_count)
 
-  for (fold in seq_len(fold_count)) {
+  rows <- run_fold_indices(fold_count, function(fold) {
     train_ids <- which(fold_ids != fold)
     test_ids <- which(fold_ids == fold)
     warnings_seen <- character()
@@ -356,8 +389,7 @@ run_zinb_fixed <- function(work_dt, fold_ids, conf, conf_name) {
     )
 
     if (inherits(fit, "zinb_error")) {
-      rows[[fold]] <- prediction_rows(work_dt, test_ids, fold, "zinb", conf_name, NA_real_, "fit_failed", fit$message)
-      next
+      return(prediction_rows(work_dt, test_ids, fold, "zinb", conf_name, NA_real_, "fit_failed", fit$message))
     }
 
     pred <- tryCatch(
@@ -366,14 +398,13 @@ run_zinb_fixed <- function(work_dt, fold_ids, conf, conf_name) {
     )
     if (inherits(pred, "zinb_error") || length(pred) != length(test_ids) || any(!is.finite(pred))) {
       note <- if (inherits(pred, "zinb_error")) pred$message else "non-finite predictions"
-      rows[[fold]] <- prediction_rows(work_dt, test_ids, fold, "zinb", conf_name, NA_real_, "predict_failed", note)
-      next
+      return(prediction_rows(work_dt, test_ids, fold, "zinb", conf_name, NA_real_, "predict_failed", note))
     }
-    rows[[fold]] <- prediction_rows(
+    prediction_rows(
       work_dt, test_ids, fold, "zinb", conf_name, pred, "ok",
       if (length(warnings_seen) > 0L) paste(unique(warnings_seen), collapse = " | ") else NA_character_
     )
-  }
+  })
   rbindlist(rows)
 }
 
@@ -390,7 +421,11 @@ for (conf_name in names(configs)) {
   loyo <- make_loyo(work_dt)
   all_fold_plans[[conf_name]] <- copy(loyo$fold_plan)[, config := conf_name]
 
-  msg(conf_name, ": LOYO folds=", max(loyo$fold_ids), ", rows=", nrow(work_dt))
+  msg(
+    conf_name, ": LOYO folds=", max(loyo$fold_ids), ", rows=", nrow(work_dt),
+    ", fold_workers=", if (parallel_folds) fold_workers else 1L,
+    ", learner_threads=", learner_threads
+  )
   for (model in intersect(run_models, c("ranger", "xgb", "zinb"))) {
     model_started <- Sys.time()
     msg("  ", conf_name, "/", model, ": start")
