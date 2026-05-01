@@ -33,9 +33,8 @@ output_dir <- Sys.getenv("LOYO_OUTPUT_DIR", file.path(repo_dir, "outputs_loyo_ex
 seed <- 123L
 learner_threads <- 1L
 parallel_folds <- TRUE
-# "auto" probiert auf Ubuntu/Linux zuerst "multicore", dann "multisession".
-# "multisession" ist RStudio-freundlich, braucht aber lokale Socket-Worker.
-# Wenn beides hakt: "sequential" setzen.
+# "auto" nutzt einen expliziten PSOCK-Cluster wie der main-code.
+# Wenn Parallelisierung hakt: "sequential" setzen.
 parallel_backend <- "auto"
 available_cores <- parallel::detectCores(logical = FALSE)
 if (is.na(available_cores)) available_cores <- 2L
@@ -94,8 +93,6 @@ needed <- c(
   "data.table",
   "mlr3",
   "mlr3learners",
-  if (parallel_folds) "future" else character(0),
-  if (parallel_folds) "future.apply" else character(0),
   if ("ranger" %in% run_models) "ranger" else character(0),
   if ("xgb" %in% run_models) "xgboost" else character(0)
 )
@@ -105,8 +102,8 @@ if ("zinb" %in% run_models && !requireNamespace("pscl", quietly = TRUE)) {
   stop("Package `pscl` is needed when run_models contains 'zinb'.", call. = FALSE)
 }
 if (parallel_folds) {
-  if (!parallel_backend %in% c("auto", "multisession", "multicore", "sequential")) {
-    stop("parallel_backend must be one of: auto, multisession, multicore, sequential.", call. = FALSE)
+  if (!parallel_backend %in% c("auto", "psock", "sequential")) {
+    stop("parallel_backend must be one of: auto, psock, sequential.", call. = FALSE)
   }
   if (identical(parallel_backend, "sequential") || fold_workers <= 1L) {
     parallel_folds <- FALSE
@@ -115,50 +112,10 @@ if (parallel_folds) {
 active_parallel_backend <- "sequential"
 active_fold_workers <- 1L
 if (parallel_folds) {
-  backend_candidates <- if (identical(parallel_backend, "auto")) {
-    if (.Platform$OS.type == "unix") c("multicore", "multisession") else "multisession"
-  } else {
-    parallel_backend
-  }
-  future_plan_ok <- FALSE
-  future_plan_errors <- character(0)
-  for (backend in backend_candidates) {
-    future_plan_ok <- tryCatch(
-      {
-        if (identical(backend, "multicore")) {
-          if (!future::supportsMulticore()) {
-            stop("future::supportsMulticore() is FALSE in this R session.", call. = FALSE)
-          }
-          future::plan(future::multicore, workers = fold_workers)
-        } else {
-          future::plan(future::multisession, workers = fold_workers)
-        }
-        active_parallel_backend <- backend
-        active_fold_workers <- future::nbrOfWorkers()
-        TRUE
-      },
-      error = function(e) {
-        future_plan_errors <<- c(future_plan_errors, paste0(backend, ": ", conditionMessage(e)))
-        FALSE
-      }
-    )
-    if (future_plan_ok) break
-  }
-  if (future_plan_ok && active_fold_workers > 1L) {
-    on.exit(future::plan(future::sequential), add = TRUE)
-  } else {
-    if (future_plan_ok) {
-      future_plan_errors <- c(future_plan_errors, paste0(active_parallel_backend, ": active workers <= 1"))
-    }
-    warning(
-      "Could not start parallel future workers; falling back to sequential folds. Tried: ",
-      paste(future_plan_errors, collapse = " | ")
-    )
-    parallel_folds <- FALSE
-    active_parallel_backend <- "sequential"
-    active_fold_workers <- 1L
-  }
+  active_parallel_backend <- "psock"
+  active_fold_workers <- as.integer(fold_workers)
 }
+psock_cluster <- NULL
 
 raw_dt <- if (exists("dt", envir = .GlobalEnv, inherits = FALSE)) {
   as.data.table(copy(get("dt", envir = .GlobalEnv)))
@@ -314,8 +271,8 @@ score_block <- function(truth, response) {
     )))
   }
 
-  sum_truth <- sum(truth[ok], na.rm = TRUE)
-  sum_pred <- sum(response[ok], na.rm = TRUE)
+  sum_truth <- as.numeric(sum(truth[ok], na.rm = TRUE))
+  sum_pred <- as.numeric(sum(response[ok], na.rm = TRUE))
   volume_error <- sum_pred - sum_truth
   has_observed_volume <- is.finite(sum_truth) && abs(sum_truth) > .Machine$double.eps
   volume <- data.table(
@@ -343,12 +300,45 @@ make_loyo <- function(work_dt) {
 run_fold_indices <- function(fold_count, fold_fun) {
   folds <- seq_len(fold_count)
   if (parallel_folds && active_fold_workers > 1L && fold_count > 1L) {
-    if (identical(active_parallel_backend, "multicore")) {
-      return(parallel::mclapply(folds, fold_fun, mc.cores = min(active_fold_workers, fold_count), mc.set.seed = TRUE))
+    if (is.null(psock_cluster)) {
+      stop("PSOCK cluster is not available although parallel_folds is TRUE.", call. = FALSE)
     }
-    return(future.apply::future_lapply(folds, fold_fun, future.seed = TRUE, future.scheduling = Inf))
+    return(parallel::parLapplyLB(psock_cluster, folds, fold_fun))
   }
   lapply(folds, fold_fun)
+}
+
+start_psock_cluster <- function() {
+  if (!parallel_folds || active_fold_workers <= 1L) {
+    return(NULL)
+  }
+
+  cluster <- tryCatch(
+    parallel::makePSOCKcluster(active_fold_workers),
+    error = function(e) {
+      warning("Could not start PSOCK workers; falling back to sequential folds: ",
+              conditionMessage(e), call. = FALSE)
+      NULL
+    }
+  )
+  if (is.null(cluster)) {
+    parallel_folds <<- FALSE
+    active_parallel_backend <<- "sequential"
+    active_fold_workers <<- 1L
+    return(NULL)
+  }
+
+  parallel::clusterEvalQ(cluster, {
+    suppressPackageStartupMessages({
+      library(data.table)
+      library(mlr3)
+      library(mlr3learners)
+    })
+    assign("model.frame", stats::model.frame, envir = .GlobalEnv)
+    NULL
+  })
+  parallel::clusterSetRNGStream(cluster, seed)
+  cluster
 }
 
 run_mlr3_fixed <- function(work_dt, fold_ids, conf, conf_name, model) {
@@ -356,7 +346,7 @@ run_mlr3_fixed <- function(work_dt, fold_ids, conf, conf_name, model) {
   params <- model_params(conf, model)
   fold_count <- max(fold_ids)
 
-  rows <- run_fold_indices(fold_count, function(fold) {
+  fold_fun <- function(fold) {
     fold_started_at <- Sys.time()
     train_ids <- which(fold_ids != fold)
     test_ids <- which(fold_ids == fold)
@@ -401,7 +391,34 @@ run_mlr3_fixed <- function(work_dt, fold_ids, conf, conf_name, model) {
       fold_started_at = fold_started_at,
       fold_finished_at = Sys.time()
     )
-  })
+  }
+
+  fold_env <- list2env(
+    list(
+      work_dt = work_dt,
+      fold_ids = fold_ids,
+      conf_name = conf_name,
+      model = model,
+      features = features,
+      params = params,
+      target = target,
+      year_col = year_col,
+      seed = seed,
+      learner_threads = learner_threads,
+      data.table = data.table::data.table,
+      encode_features_train_test = encode_features_train_test,
+      apply_params = apply_params,
+      prediction_rows = prediction_rows,
+      `%||%` = `%||%`
+    ),
+    parent = baseenv()
+  )
+  environment(fold_env$encode_features_train_test) <- baseenv()
+  environment(fold_env$apply_params) <- fold_env
+  environment(fold_env$prediction_rows) <- fold_env
+  environment(fold_fun) <- fold_env
+
+  rows <- run_fold_indices(fold_count, fold_fun)
   rbindlist(rows)
 }
 
@@ -422,18 +439,23 @@ run_zinb_fixed <- function(work_dt, fold_ids, conf, conf_name) {
   }
   fold_count <- max(fold_ids)
 
-  rows <- run_fold_indices(fold_count, function(fold) {
+  fold_fun <- function(fold) {
     fold_started_at <- Sys.time()
     train_ids <- which(fold_ids != fold)
     test_ids <- which(fold_ids == fold)
     warnings_seen <- character()
+    fold_form <- form
+    environment(fold_form) <- list2env(
+      list(model.frame = stats::model.frame),
+      parent = .GlobalEnv
+    )
 
     fit <- tryCatch(
       withCallingHandlers(
         do.call(
           pscl::zeroinfl,
           c(
-            list(formula = form, data = work_dt[train_ids]),
+            list(formula = fold_form, data = work_dt[train_ids]),
             zeroinfl_args,
             list(control = do.call(pscl::zeroinfl.control, control_args))
           )
@@ -472,40 +494,78 @@ run_zinb_fixed <- function(work_dt, fold_ids, conf, conf_name) {
       fold_started_at = fold_started_at,
       fold_finished_at = Sys.time()
     )
-  })
+  }
+
+  fold_env <- list2env(
+    list(
+      work_dt = work_dt,
+      fold_ids = fold_ids,
+      conf_name = conf_name,
+      form = form,
+      zeroinfl_args = zeroinfl_args,
+      control_args = control_args,
+      target = target,
+      year_col = year_col,
+      data.table = data.table::data.table,
+      model.frame = stats::model.frame,
+      predict = stats::predict,
+      prediction_rows = prediction_rows
+    ),
+    parent = baseenv()
+  )
+  environment(fold_env$prediction_rows) <- fold_env
+  environment(fold_fun) <- fold_env
+
+  rows <- run_fold_indices(fold_count, fold_fun)
   rbindlist(rows)
 }
 
 # ---- run ---------------------------------------------------------------------
 started_at <- Sys.time()
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+psock_cluster <- start_psock_cluster()
 all_predictions <- list()
 all_fold_plans <- list()
 
-for (conf_name in names(configs)) {
-  conf <- configs[[conf_name]]
-  work_dt <- as_config_dt(conf, conf_name)
-  check_cols(work_dt, c(target, year_col, config_features(conf)), paste0("Config '", conf_name, "'"))
-  loyo <- make_loyo(work_dt)
-  all_fold_plans[[conf_name]] <- copy(loyo$fold_plan)[, config := conf_name]
+run_error <- NULL
+tryCatch(
+  {
+    for (conf_name in names(configs)) {
+      conf <- configs[[conf_name]]
+      work_dt <- as_config_dt(conf, conf_name)
+      check_cols(work_dt, c(target, year_col, config_features(conf)), paste0("Config '", conf_name, "'"))
+      loyo <- make_loyo(work_dt)
+      all_fold_plans[[conf_name]] <- copy(loyo$fold_plan)[, config := conf_name]
 
-  msg(
-    conf_name, ": LOYO folds=", max(loyo$fold_ids), ", rows=", nrow(work_dt),
-    ", backend=", active_parallel_backend,
-    ", requested_workers=", fold_workers,
-    ", active_workers=", active_fold_workers,
-    ", learner_threads=", learner_threads
-  )
-  for (model in intersect(run_models, c("ranger", "xgb", "zinb"))) {
-    model_started <- Sys.time()
-    msg("  ", conf_name, "/", model, ": start")
-    all_predictions[[paste(conf_name, model, sep = "::")]] <- if (identical(model, "zinb")) {
-      run_zinb_fixed(work_dt, loyo$fold_ids, conf, conf_name)
-    } else {
-      run_mlr3_fixed(work_dt, loyo$fold_ids, conf, conf_name, model)
+      msg(
+        conf_name, ": LOYO folds=", max(loyo$fold_ids), ", rows=", nrow(work_dt),
+        ", backend=", active_parallel_backend,
+        ", requested_workers=", fold_workers,
+        ", active_workers=", active_fold_workers,
+        ", learner_threads=", learner_threads
+      )
+      for (model in intersect(run_models, c("ranger", "xgb", "zinb"))) {
+        model_started <- Sys.time()
+        msg("  ", conf_name, "/", model, ": start")
+        all_predictions[[paste(conf_name, model, sep = "::")]] <- if (identical(model, "zinb")) {
+          run_zinb_fixed(work_dt, loyo$fold_ids, conf, conf_name)
+        } else {
+          run_mlr3_fixed(work_dt, loyo$fold_ids, conf, conf_name, model)
+        }
+        msg("  ", conf_name, "/", model, ": done in ", elapsed(model_started))
+      }
     }
-    msg("  ", conf_name, "/", model, ": done in ", elapsed(model_started))
+  },
+  error = function(e) {
+    run_error <<- e
   }
+)
+if (!is.null(psock_cluster)) {
+  parallel::stopCluster(psock_cluster)
+  psock_cluster <- NULL
+}
+if (!is.null(run_error)) {
+  stop(run_error)
 }
 
 predictions <- rbindlist(all_predictions, fill = TRUE)
