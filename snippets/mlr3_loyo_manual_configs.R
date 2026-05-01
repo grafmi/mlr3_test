@@ -33,9 +33,9 @@ output_dir <- Sys.getenv("LOYO_OUTPUT_DIR", file.path(repo_dir, "outputs_loyo_ex
 seed <- 123L
 learner_threads <- 1L
 parallel_folds <- TRUE
+# "auto" probiert auf Ubuntu/Linux zuerst "multicore", dann "multisession".
 # "multisession" ist RStudio-freundlich, braucht aber lokale Socket-Worker.
-# Auf Ubuntu/Linux kann "multicore" schneller sein, ist in manchen RStudio-Setups
-# aber deaktiviert. Wenn beides hakt: "sequential" setzen.
+# Wenn beides hakt: "sequential" setzen.
 parallel_backend <- "auto"
 available_cores <- parallel::detectCores(logical = FALSE)
 if (is.na(available_cores)) available_cores <- 2L
@@ -116,7 +116,7 @@ active_parallel_backend <- "sequential"
 active_fold_workers <- 1L
 if (parallel_folds) {
   backend_candidates <- if (identical(parallel_backend, "auto")) {
-    if (.Platform$OS.type == "unix") c("multisession", "multicore") else "multisession"
+    if (.Platform$OS.type == "unix") c("multicore", "multisession") else "multisession"
   } else {
     parallel_backend
   }
