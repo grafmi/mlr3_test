@@ -127,15 +127,23 @@ check_cols <- function(dt, cols, label) {
   }
 }
 
+configured_features <- function(x) {
+  x$features %||% x$feature_cols
+}
+
 model_features <- function(conf, model) {
   model_conf <- conf[[model]] %||% list()
-  if (identical(model, "zinb") && !is.null(model_conf$formula) && is.null(model_conf$features)) {
+  if (identical(model, "zinb") && !is.null(model_conf$formula) && is.null(configured_features(model_conf))) {
     return(zinb_formula_features(conf))
   }
-  features <- model_conf$features %||% conf$features
+  features <- configured_features(model_conf) %||% configured_features(conf)
   features <- unique(as.character(features))
   if (length(features) == 0L || anyNA(features) || any(!nzchar(features))) {
-    stop("Config model '", model, "' needs at least one non-empty feature name.", call. = FALSE)
+    stop(
+      "Config model '", model,
+      "' needs at least one non-empty feature name via `features` or `feature_cols`.",
+      call. = FALSE
+    )
   }
   features
 }
@@ -166,7 +174,8 @@ config_features <- function(conf) {
 model_params <- function(conf, model) {
   model_conf <- conf[[model]] %||% list()
   reserved <- c(
-    "features", "params", "formula", "count_rhs", "zero_rhs", "zeroinfl_args", "control_args", "EM", "maxit", "dist"
+    "features", "feature_cols", "params", "formula", "count_rhs", "zero_rhs",
+    "zeroinfl_args", "control_args", "EM", "maxit", "dist"
   )
   flat_params <- model_conf[setdiff(names(model_conf), reserved)]
   nested_params <- model_conf$params %||% list()
