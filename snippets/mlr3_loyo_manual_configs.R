@@ -188,6 +188,30 @@ zinb_formula <- function(conf) {
   as.formula(sprintf("%s ~ %s | %s", target, count_rhs, zero_rhs))
 }
 
+formula_uses_call <- function(x, call_name) {
+  if (is.call(x)) {
+    head <- x[[1L]]
+    if (is.symbol(head) && identical(as.character(head), call_name)) {
+      return(TRUE)
+    }
+    return(any(vapply(as.list(x[-1L]), formula_uses_call, logical(1), call_name = call_name)))
+  }
+  if (is.pairlist(x) || is.list(x)) {
+    return(any(vapply(as.list(x), formula_uses_call, logical(1), call_name = call_name)))
+  }
+  FALSE
+}
+
+validate_zinb_formula <- function(form, conf_name) {
+  if (formula_uses_call(form, "log_1p")) {
+    stop(
+      "Config '", conf_name, "' zinb$formula uses `log_1p()`. ",
+      "Use base R `log1p()` instead; `log_1p()` is not aliased by this snippet.",
+      call. = FALSE
+    )
+  }
+}
+
 zinb_formula_features <- function(conf) {
   setdiff(all.vars(zinb_formula(conf)), target)
 }
@@ -240,8 +264,7 @@ as_named_list <- function(x, label) {
 
 zinb_worker_formula_env <- function(configs) {
   helpers <- list(
-    model.frame = stats::model.frame,
-    log_1p = base::log1p
+    model.frame = stats::model.frame
   )
   for (conf_name in names(configs)) {
     zconf <- configs[[conf_name]]$zinb %||% list()
@@ -479,6 +502,7 @@ run_mlr3_fixed <- function(work_dt, fold_ids, conf, conf_name, model) {
 run_zinb_fixed <- function(work_dt, fold_ids, conf, conf_name) {
   zconf <- conf$zinb %||% list()
   form <- zinb_formula(conf)
+  validate_zinb_formula(form, conf_name)
   zeroinfl_args <- utils::modifyList(
     list(dist = zconf$dist %||% "negbin", EM = isTRUE(zconf$EM %||% TRUE)),
     zconf$zeroinfl_args %||% list()
