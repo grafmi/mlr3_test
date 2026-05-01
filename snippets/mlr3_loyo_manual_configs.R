@@ -33,6 +33,10 @@ output_dir <- Sys.getenv("LOYO_OUTPUT_DIR", file.path(repo_dir, "outputs_loyo_ex
 seed <- 123L
 learner_threads <- 1L
 parallel_folds <- TRUE
+# "multisession" ist RStudio-freundlich, braucht aber lokale Socket-Worker.
+# Auf Ubuntu/Linux kann "multicore" schneller sein, ist in manchen RStudio-Setups
+# aber deaktiviert. Wenn beides hakt: "sequential" setzen.
+parallel_backend <- "multisession"
 available_cores <- parallel::detectCores(logical = FALSE)
 if (is.na(available_cores)) available_cores <- 2L
 fold_workers <- max(1L, min(4L, available_cores - 1L))
@@ -101,20 +105,41 @@ if ("zinb" %in% run_models && !requireNamespace("pscl", quietly = TRUE)) {
   stop("Package `pscl` is needed when run_models contains 'zinb'.", call. = FALSE)
 }
 if (parallel_folds) {
+  if (!parallel_backend %in% c("multisession", "multicore", "sequential")) {
+    stop("parallel_backend must be one of: multisession, multicore, sequential.", call. = FALSE)
+  }
+  if (identical(parallel_backend, "sequential") || fold_workers <= 1L) {
+    parallel_folds <- FALSE
+  }
+}
+active_parallel_backend <- "sequential"
+if (parallel_folds) {
   future_plan_ok <- tryCatch(
     {
-      future::plan(future::multisession, workers = fold_workers)
+      if (identical(parallel_backend, "multicore")) {
+        if (!future::supportsMulticore()) {
+          stop("future::supportsMulticore() is FALSE in this R session.", call. = FALSE)
+        }
+        future::plan(future::multicore, workers = fold_workers)
+      } else {
+        future::plan(future::multisession, workers = fold_workers)
+      }
       TRUE
     },
     error = function(e) {
-      warning("Could not start future multisession workers; falling back to sequential folds: ", conditionMessage(e))
+      warning(
+        "Could not start future ", parallel_backend,
+        " workers; falling back to sequential folds: ", conditionMessage(e)
+      )
       FALSE
     }
   )
   if (future_plan_ok) {
+    active_parallel_backend <- parallel_backend
     on.exit(future::plan(future::sequential), add = TRUE)
   } else {
     parallel_folds <- FALSE
+    active_parallel_backend <- "sequential"
   }
 }
 
@@ -423,6 +448,7 @@ for (conf_name in names(configs)) {
 
   msg(
     conf_name, ": LOYO folds=", max(loyo$fold_ids), ", rows=", nrow(work_dt),
+    ", backend=", active_parallel_backend,
     ", fold_workers=", if (parallel_folds) fold_workers else 1L,
     ", learner_threads=", learner_threads
   )
