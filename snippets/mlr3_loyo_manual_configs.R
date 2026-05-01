@@ -86,6 +86,8 @@ configs <- list(
     ),
     zinb = list(
       formula = n_eintritte ~ prcrank + log1p(potenzielle_kunden) + unfalldeckung | 1,
+      # Nur fuer eigene Funktionen in der Formel; log1p(), factor(), ns() etc. gehen direkt.
+      # formula_env = list(my_transform = function(x) log1p(pmax(x, 0))),
       zeroinfl_args = list(dist = "negbin", EM = TRUE),
       control_args = list(maxit = 100L)
     )
@@ -216,11 +218,37 @@ model_params <- function(conf, model) {
   model_conf <- conf[[model]] %||% list()
   reserved <- c(
     "features", "feature_cols", "threads", "params", "formula", "count_rhs", "zero_rhs",
-    "zeroinfl_args", "control_args", "EM", "maxit", "dist"
+    "formula_env", "zeroinfl_args", "control_args", "EM", "maxit", "dist"
   )
   flat_params <- model_conf[setdiff(names(model_conf), reserved)]
   nested_params <- model_conf$params %||% list()
   utils::modifyList(flat_params, nested_params)
+}
+
+as_named_list <- function(x, label) {
+  if (is.null(x)) {
+    return(list())
+  }
+  if (is.environment(x)) {
+    x <- as.list(x, all.names = TRUE)
+  }
+  if (!is.list(x) || is.null(names(x)) || any(!nzchar(names(x)))) {
+    stop(label, " must be a named list or environment.", call. = FALSE)
+  }
+  x
+}
+
+zinb_worker_formula_env <- function(configs) {
+  helpers <- list(
+    model.frame = stats::model.frame,
+    log_1p = base::log1p
+  )
+  for (conf_name in names(configs)) {
+    zconf <- configs[[conf_name]]$zinb %||% list()
+    custom <- as_named_list(zconf$formula_env, paste0("configs$", conf_name, "$zinb$formula_env"))
+    helpers <- utils::modifyList(helpers, custom)
+  }
+  helpers
 }
 
 as_config_dt <- function(conf, conf_name) {
@@ -352,8 +380,14 @@ start_psock_cluster <- function() {
       library(data.table)
       library(mlr3)
       library(mlr3learners)
+      library(splines)
     })
-    assign("model.frame", stats::model.frame, envir = .GlobalEnv)
+    NULL
+  })
+  formula_helpers <- zinb_worker_formula_env(configs)
+  parallel::clusterExport(cluster, "formula_helpers", envir = environment())
+  parallel::clusterEvalQ(cluster, {
+    list2env(formula_helpers, envir = .GlobalEnv)
     NULL
   })
   parallel::clusterSetRNGStream(cluster, seed)
@@ -464,18 +498,13 @@ run_zinb_fixed <- function(work_dt, fold_ids, conf, conf_name) {
     train_ids <- which(fold_ids != fold)
     test_ids <- which(fold_ids == fold)
     warnings_seen <- character()
-    fold_form <- form
-    environment(fold_form) <- list2env(
-      list(model.frame = stats::model.frame),
-      parent = .GlobalEnv
-    )
 
     fit <- tryCatch(
       withCallingHandlers(
         do.call(
           pscl::zeroinfl,
           c(
-            list(formula = fold_form, data = work_dt[train_ids]),
+            list(formula = form, data = work_dt[train_ids]),
             zeroinfl_args,
             list(control = do.call(pscl::zeroinfl.control, control_args))
           )
