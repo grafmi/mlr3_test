@@ -36,7 +36,7 @@ parallel_folds <- TRUE
 # "multisession" ist RStudio-freundlich, braucht aber lokale Socket-Worker.
 # Auf Ubuntu/Linux kann "multicore" schneller sein, ist in manchen RStudio-Setups
 # aber deaktiviert. Wenn beides hakt: "sequential" setzen.
-parallel_backend <- "multisession"
+parallel_backend <- "auto"
 available_cores <- parallel::detectCores(logical = FALSE)
 if (is.na(available_cores)) available_cores <- 2L
 fold_workers <- max(1L, min(4L, available_cores - 1L))
@@ -105,41 +105,58 @@ if ("zinb" %in% run_models && !requireNamespace("pscl", quietly = TRUE)) {
   stop("Package `pscl` is needed when run_models contains 'zinb'.", call. = FALSE)
 }
 if (parallel_folds) {
-  if (!parallel_backend %in% c("multisession", "multicore", "sequential")) {
-    stop("parallel_backend must be one of: multisession, multicore, sequential.", call. = FALSE)
+  if (!parallel_backend %in% c("auto", "multisession", "multicore", "sequential")) {
+    stop("parallel_backend must be one of: auto, multisession, multicore, sequential.", call. = FALSE)
   }
   if (identical(parallel_backend, "sequential") || fold_workers <= 1L) {
     parallel_folds <- FALSE
   }
 }
 active_parallel_backend <- "sequential"
+active_fold_workers <- 1L
 if (parallel_folds) {
-  future_plan_ok <- tryCatch(
-    {
-      if (identical(parallel_backend, "multicore")) {
-        if (!future::supportsMulticore()) {
-          stop("future::supportsMulticore() is FALSE in this R session.", call. = FALSE)
+  backend_candidates <- if (identical(parallel_backend, "auto")) {
+    if (.Platform$OS.type == "unix") c("multisession", "multicore") else "multisession"
+  } else {
+    parallel_backend
+  }
+  future_plan_ok <- FALSE
+  future_plan_errors <- character(0)
+  for (backend in backend_candidates) {
+    future_plan_ok <- tryCatch(
+      {
+        if (identical(backend, "multicore")) {
+          if (!future::supportsMulticore()) {
+            stop("future::supportsMulticore() is FALSE in this R session.", call. = FALSE)
+          }
+          future::plan(future::multicore, workers = fold_workers)
+        } else {
+          future::plan(future::multisession, workers = fold_workers)
         }
-        future::plan(future::multicore, workers = fold_workers)
-      } else {
-        future::plan(future::multisession, workers = fold_workers)
+        active_parallel_backend <- backend
+        active_fold_workers <- future::nbrOfWorkers()
+        TRUE
+      },
+      error = function(e) {
+        future_plan_errors <<- c(future_plan_errors, paste0(backend, ": ", conditionMessage(e)))
+        FALSE
       }
-      TRUE
-    },
-    error = function(e) {
-      warning(
-        "Could not start future ", parallel_backend,
-        " workers; falling back to sequential folds: ", conditionMessage(e)
-      )
-      FALSE
-    }
-  )
-  if (future_plan_ok) {
-    active_parallel_backend <- parallel_backend
+    )
+    if (future_plan_ok) break
+  }
+  if (future_plan_ok && active_fold_workers > 1L) {
     on.exit(future::plan(future::sequential), add = TRUE)
   } else {
+    if (future_plan_ok) {
+      future_plan_errors <- c(future_plan_errors, paste0(active_parallel_backend, ": active workers <= 1"))
+    }
+    warning(
+      "Could not start parallel future workers; falling back to sequential folds. Tried: ",
+      paste(future_plan_errors, collapse = " | ")
+    )
     parallel_folds <- FALSE
     active_parallel_backend <- "sequential"
+    active_fold_workers <- 1L
   }
 }
 
@@ -318,7 +335,7 @@ make_loyo <- function(work_dt) {
 
 run_fold_indices <- function(fold_count, fold_fun) {
   folds <- seq_len(fold_count)
-  if (parallel_folds && fold_workers > 1L && fold_count > 1L) {
+  if (parallel_folds && active_fold_workers > 1L && fold_count > 1L) {
     return(future.apply::future_lapply(folds, fold_fun, future.seed = TRUE))
   }
   lapply(folds, fold_fun)
@@ -449,7 +466,8 @@ for (conf_name in names(configs)) {
   msg(
     conf_name, ": LOYO folds=", max(loyo$fold_ids), ", rows=", nrow(work_dt),
     ", backend=", active_parallel_backend,
-    ", fold_workers=", if (parallel_folds) fold_workers else 1L,
+    ", requested_workers=", fold_workers,
+    ", active_workers=", active_fold_workers,
     ", learner_threads=", learner_threads
   )
   for (model in intersect(run_models, c("ranger", "xgb", "zinb"))) {
