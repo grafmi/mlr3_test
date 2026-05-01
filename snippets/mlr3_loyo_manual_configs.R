@@ -31,7 +31,9 @@ data_path <- Sys.getenv("LOYO_DATA_PATH", file.path(repo_dir, "testfile_zinb_non
 row_filter <- "" # z.B. "segment == 'A' & year >= 2021"; leer lassen fuer alles
 output_dir <- Sys.getenv("LOYO_OUTPUT_DIR", file.path(repo_dir, "outputs_loyo_exploration"))
 seed <- 123L
-learner_threads <- 1L
+learner_threads <- 1L # gemeinsamer Default; mit PSOCK meist bei 1 lassen
+ranger_threads <- learner_threads
+xgb_threads <- learner_threads
 parallel_folds <- TRUE
 # "auto" nutzt einen expliziten PSOCK-Cluster wie der main-code.
 # Wenn Parallelisierung hakt: "sequential" setzen.
@@ -46,6 +48,7 @@ configs <- list(
     features = c("prcrank", "potenzielle_kunden", "unfalldeckung"),
     ranger = list(
       features = c("prcrank", "potenzielle_kunden", "unfalldeckung"),
+      # threads = 2L,
       params = list(
         num.trees = 400L,
         mtry = 2L,
@@ -63,6 +66,7 @@ configs <- list(
     ),
     xgb = list(
       features = c("prcrank", "potenzielle_kunden", "unfalldeckung"),
+      # threads = 2L,
       params = list(
         objective = "reg:squarederror",
         nrounds = 200L,
@@ -193,10 +197,25 @@ config_features <- function(conf) {
   ))
 }
 
+model_threads <- function(conf, model) {
+  model_conf <- conf[[model]] %||% list()
+  fallback <- switch(
+    model,
+    ranger = ranger_threads,
+    xgb = xgb_threads,
+    learner_threads
+  )
+  threads <- as.integer(model_conf$threads %||% fallback)
+  if (length(threads) != 1L || is.na(threads) || threads < 1L) {
+    stop("Config model '", model, "' needs `threads` >= 1.", call. = FALSE)
+  }
+  threads
+}
+
 model_params <- function(conf, model) {
   model_conf <- conf[[model]] %||% list()
   reserved <- c(
-    "features", "feature_cols", "params", "formula", "count_rhs", "zero_rhs",
+    "features", "feature_cols", "threads", "params", "formula", "count_rhs", "zero_rhs",
     "zeroinfl_args", "control_args", "EM", "maxit", "dist"
   )
   flat_params <- model_conf[setdiff(names(model_conf), reserved)]
@@ -344,6 +363,7 @@ start_psock_cluster <- function() {
 run_mlr3_fixed <- function(work_dt, fold_ids, conf, conf_name, model) {
   features <- model_features(conf, model)
   params <- model_params(conf, model)
+  threads <- model_threads(conf, model)
   fold_count <- max(fold_ids)
 
   fold_fun <- function(fold) {
@@ -367,7 +387,7 @@ run_mlr3_fixed <- function(work_dt, fold_ids, conf, conf_name, model) {
         as.data.frame(encoded$test),
         target
       )
-      learner <- mlr3::lrn("regr.xgboost", predict_type = "response", nthread = learner_threads)
+      learner <- mlr3::lrn("regr.xgboost", predict_type = "response", nthread = threads)
     } else {
       train_task <- mlr3::TaskRegr$new(
         sprintf("%s_%s_train_f%s", conf_name, model, fold),
@@ -379,7 +399,7 @@ run_mlr3_fixed <- function(work_dt, fold_ids, conf, conf_name, model) {
         as.data.frame(work_dt[test_ids, c(target, features), with = FALSE]),
         target
       )
-      learner <- mlr3::lrn("regr.ranger", predict_type = "response", num.threads = learner_threads)
+      learner <- mlr3::lrn("regr.ranger", predict_type = "response", num.threads = threads)
     }
 
     learner <- apply_params(learner, params, paste(conf_name, model))
@@ -401,10 +421,10 @@ run_mlr3_fixed <- function(work_dt, fold_ids, conf, conf_name, model) {
       model = model,
       features = features,
       params = params,
+      threads = threads,
       target = target,
       year_col = year_col,
       seed = seed,
-      learner_threads = learner_threads,
       data.table = data.table::data.table,
       encode_features_train_test = encode_features_train_test,
       apply_params = apply_params,
@@ -542,7 +562,8 @@ tryCatch(
         ", backend=", active_parallel_backend,
         ", requested_workers=", fold_workers,
         ", active_workers=", active_fold_workers,
-        ", learner_threads=", learner_threads
+        ", ranger_threads=", model_threads(conf, "ranger"),
+        ", xgb_threads=", model_threads(conf, "xgb")
       )
       for (model in intersect(run_models, c("ranger", "xgb", "zinb"))) {
         model_started <- Sys.time()
@@ -594,7 +615,18 @@ safe_write_csv(overall_metrics, file.path(output_dir, "loyo_overall_metrics.csv"
 safe_write_csv(comparison, file.path(output_dir, "loyo_comparison.csv"))
 safe_write_csv(parallel_diagnostics, file.path(output_dir, "loyo_parallel_diagnostics.csv"))
 safe_write_csv(fold_plan, file.path(output_dir, "loyo_fold_plan.csv"))
-write_config_snapshot(output_dir, list(target = target, year_col = year_col, configs = configs), prefix = "loyo_config")
+write_config_snapshot(
+  output_dir,
+  list(
+    target = target,
+    year_col = year_col,
+    fold_workers = fold_workers,
+    ranger_threads = ranger_threads,
+    xgb_threads = xgb_threads,
+    configs = configs
+  ),
+  prefix = "loyo_config"
+)
 write_session_info(output_dir)
 
 if (requireNamespace("ggplot2", quietly = TRUE)) {
