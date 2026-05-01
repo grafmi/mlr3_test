@@ -271,7 +271,9 @@ apply_params <- function(learner, params, label) {
   learner
 }
 
-prediction_rows <- function(work_dt, test_ids, fold, model, conf_name, response, status = "ok", note = NA_character_) {
+prediction_rows <- function(work_dt, test_ids, fold, model, conf_name, response,
+                            status = "ok", note = NA_character_,
+                            fold_started_at = NA_real_, fold_finished_at = NA_real_) {
   out <- data.table(
     config = conf_name,
     model = model,
@@ -281,7 +283,12 @@ prediction_rows <- function(work_dt, test_ids, fold, model, conf_name, response,
     truth = work_dt[[target]][test_ids],
     response = as.numeric(response),
     status = status,
-    note = note
+    note = note,
+    worker_pid = Sys.getpid(),
+    worker_host = Sys.info()[["nodename"]],
+    fold_started_at = as.numeric(fold_started_at),
+    fold_finished_at = as.numeric(fold_finished_at),
+    fold_elapsed_seconds = as.numeric(fold_finished_at) - as.numeric(fold_started_at)
   )
   out$error <- out$response - out$truth
   out$abs_error <- abs(out$error)
@@ -336,7 +343,10 @@ make_loyo <- function(work_dt) {
 run_fold_indices <- function(fold_count, fold_fun) {
   folds <- seq_len(fold_count)
   if (parallel_folds && active_fold_workers > 1L && fold_count > 1L) {
-    return(future.apply::future_lapply(folds, fold_fun, future.seed = TRUE))
+    if (identical(active_parallel_backend, "multicore")) {
+      return(parallel::mclapply(folds, fold_fun, mc.cores = min(active_fold_workers, fold_count), mc.set.seed = TRUE))
+    }
+    return(future.apply::future_lapply(folds, fold_fun, future.seed = TRUE, future.scheduling = Inf))
   }
   lapply(folds, fold_fun)
 }
@@ -347,6 +357,7 @@ run_mlr3_fixed <- function(work_dt, fold_ids, conf, conf_name, model) {
   fold_count <- max(fold_ids)
 
   rows <- run_fold_indices(fold_count, function(fold) {
+    fold_started_at <- Sys.time()
     train_ids <- which(fold_ids != fold)
     test_ids <- which(fold_ids == fold)
 
@@ -385,7 +396,11 @@ run_mlr3_fixed <- function(work_dt, fold_ids, conf, conf_name, model) {
     set.seed(seed + fold)
     learner$train(train_task)
     pred <- learner$predict(test_task)
-    prediction_rows(work_dt, test_ids, fold, model, conf_name, pred$response)
+    prediction_rows(
+      work_dt, test_ids, fold, model, conf_name, pred$response,
+      fold_started_at = fold_started_at,
+      fold_finished_at = Sys.time()
+    )
   })
   rbindlist(rows)
 }
@@ -408,6 +423,7 @@ run_zinb_fixed <- function(work_dt, fold_ids, conf, conf_name) {
   fold_count <- max(fold_ids)
 
   rows <- run_fold_indices(fold_count, function(fold) {
+    fold_started_at <- Sys.time()
     train_ids <- which(fold_ids != fold)
     test_ids <- which(fold_ids == fold)
     warnings_seen <- character()
@@ -431,7 +447,11 @@ run_zinb_fixed <- function(work_dt, fold_ids, conf, conf_name) {
     )
 
     if (inherits(fit, "zinb_error")) {
-      return(prediction_rows(work_dt, test_ids, fold, "zinb", conf_name, NA_real_, "fit_failed", fit$message))
+      return(prediction_rows(
+        work_dt, test_ids, fold, "zinb", conf_name, NA_real_, "fit_failed", fit$message,
+        fold_started_at = fold_started_at,
+        fold_finished_at = Sys.time()
+      ))
     }
 
     pred <- tryCatch(
@@ -440,11 +460,17 @@ run_zinb_fixed <- function(work_dt, fold_ids, conf, conf_name) {
     )
     if (inherits(pred, "zinb_error") || length(pred) != length(test_ids) || any(!is.finite(pred))) {
       note <- if (inherits(pred, "zinb_error")) pred$message else "non-finite predictions"
-      return(prediction_rows(work_dt, test_ids, fold, "zinb", conf_name, NA_real_, "predict_failed", note))
+      return(prediction_rows(
+        work_dt, test_ids, fold, "zinb", conf_name, NA_real_, "predict_failed", note,
+        fold_started_at = fold_started_at,
+        fold_finished_at = Sys.time()
+      ))
     }
     prediction_rows(
       work_dt, test_ids, fold, "zinb", conf_name, pred, "ok",
-      if (length(warnings_seen) > 0L) paste(unique(warnings_seen), collapse = " | ") else NA_character_
+      if (length(warnings_seen) > 0L) paste(unique(warnings_seen), collapse = " | ") else NA_character_,
+      fold_started_at = fold_started_at,
+      fold_finished_at = Sys.time()
     )
   })
   rbindlist(rows)
@@ -486,6 +512,18 @@ predictions <- rbindlist(all_predictions, fill = TRUE)
 fold_plan <- rbindlist(all_fold_plans, fill = TRUE)
 fold_metrics <- score_predictions(predictions, c("config", "model", "fold", "year"))
 overall_metrics <- score_predictions(predictions, c("config", "model"))
+parallel_diagnostics <- predictions[, .(
+  n_folds = uniqueN(fold),
+  n_worker_pids = uniqueN(worker_pid),
+  worker_pids = paste(sort(unique(worker_pid)), collapse = ", "),
+  worker_hosts = paste(sort(unique(worker_host)), collapse = ", "),
+  first_fold_started_at = min(fold_started_at, na.rm = TRUE),
+  last_fold_started_at = max(fold_started_at, na.rm = TRUE),
+  first_fold_finished_at = min(fold_finished_at, na.rm = TRUE),
+  last_fold_finished_at = max(fold_finished_at, na.rm = TRUE),
+  max_fold_elapsed_seconds = max(fold_elapsed_seconds, na.rm = TRUE)
+), by = .(config, model)]
+parallel_diagnostics[, folds_overlap := last_fold_started_at < first_fold_finished_at]
 comparison <- copy(overall_metrics)[order(rmse, mae, wape)]
 comparison[, rank_rmse := seq_len(.N)]
 setcolorder(comparison, c("rank_rmse", setdiff(names(comparison), "rank_rmse")))
@@ -494,6 +532,7 @@ safe_write_csv(predictions, file.path(output_dir, "loyo_predictions.csv"))
 safe_write_csv(fold_metrics, file.path(output_dir, "loyo_fold_metrics.csv"))
 safe_write_csv(overall_metrics, file.path(output_dir, "loyo_overall_metrics.csv"))
 safe_write_csv(comparison, file.path(output_dir, "loyo_comparison.csv"))
+safe_write_csv(parallel_diagnostics, file.path(output_dir, "loyo_parallel_diagnostics.csv"))
 safe_write_csv(fold_plan, file.path(output_dir, "loyo_fold_plan.csv"))
 write_config_snapshot(output_dir, list(target = target, year_col = year_col, configs = configs), prefix = "loyo_config")
 write_session_info(output_dir)
@@ -569,6 +608,7 @@ report_lines <- c(
   "- `loyo_overall_metrics.csv` / `.rds`",
   "- `loyo_fold_metrics.csv` / `.rds`",
   "- `loyo_predictions.csv` / `.rds`",
+  "- `loyo_parallel_diagnostics.csv` / `.rds`",
   "- `loyo_fold_plan.csv` / `.rds`",
   paste0(
     "- `loyo_comparison_rmse.png`, `loyo_rmse_by_year.png`, ",
@@ -582,9 +622,11 @@ loyo_results <- list(
   overall_metrics = overall_metrics,
   fold_metrics = fold_metrics,
   predictions = predictions,
+  parallel_diagnostics = parallel_diagnostics,
   fold_plan = fold_plan,
   output_dir = output_dir
 )
 
 print(comparison)
+print(parallel_diagnostics)
 msg("LOYO validation written to: ", normalizePath(output_dir, mustWork = FALSE))
